@@ -47,7 +47,7 @@ Reward Align Scorer 的目标不是替代所有 Judge，而是作为一个 **低
 
 ## 📊 性能参考
 
-在实际 RL rollout 场景中，使用 `batch_size=32`、`rollout.n=8`、`mean_response_length≈3096` 的配置，一个 step 的 reward compute 可以在零点几秒内完成。这个结果说明该 scorer 适合作为 rollout 阶段的在线 reward pre-scorer，用于降低同步训练中 reward 侧等待造成的 pipeline bubble。
+在实际 RL rollout 场景中，基于 **32B 参数模型**，使用 `batch_size=32`、`rollout.n=8`、`mean_response_length≈3096` 的配置，一个 step 的 reward compute 可以在零点几秒内完成。这个结果说明该 scorer 适合作为 rollout 阶段的在线 reward pre-scorer，用于降低同步训练中 reward 侧等待造成的 pipeline bubble。
 
 > 具体延迟会随 embedding 模型、GPU/NPU 型号、窗口参数、缓存命中率和 response 长度变化。建议在自己的训练环境中运行 `benchmarks/benchmark_latency.py` 做标定。
 

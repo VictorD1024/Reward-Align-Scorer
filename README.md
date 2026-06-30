@@ -51,7 +51,7 @@ The goal is not to replace all Judge calls. A practical deployment uses this sco
 
 ## 📊 Performance Reference
 
-In an actual RL rollout setting with `batch_size=32`, `rollout.n=8`, and `mean_response_length≈3096`, one step of reward compute finished within a sub-second range. This makes the scorer practical as an online reward pre-scorer during rollout, reducing reward-side waiting and pipeline bubbles in synchronous training.
+In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`, `rollout.n=8`, and `mean_response_length≈3096`, one step of reward compute finished within a sub-second range. This makes the scorer practical as an online reward pre-scorer during rollout, reducing reward-side waiting and pipeline bubbles in synchronous training.
 
 > Latency depends on the embedding model, GPU/NPU hardware, window configuration, cache hit rate, and response length. Run `benchmarks/benchmark_latency.py` in your own training environment for calibration.
 
