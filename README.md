@@ -87,11 +87,18 @@ backend = load_embedding_backend("/path/to/your_embedding_model")
 scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.65))
 
 result = scorer.score(
-    response="先检查状态，然后打开目标开关，确认状态稳定后记录结果。",
-    reference_steps=["检查状态", "打开目标开关", "确认状态稳定", "记录结果"],
+    response="I read the issue, inspected the relevant files, patched the implementation, ran tests, and summarized the fix.",
+    reference_steps=[
+        "read the issue",
+        "inspect relevant files",
+        "modify the implementation",
+        "run tests",
+        "summarize the fix",
+    ],
 )
 
 print(result.score)
+print(result.match_rate, result.order_rate)
 print(result.matched_steps)
 print(result.unmatched_steps)
 ```

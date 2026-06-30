@@ -9,8 +9,17 @@ def main():
 
     scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.65))
     result = scorer.score(
-        response="先读取任务，再检查相关文件，修改实现后运行测试，最后总结修复结果。",
-        reference_steps=["读取任务", "检查相关文件", "修改实现", "运行测试", "总结修复结果"],
+        response=(
+            "I read the issue, inspected the relevant files, patched the implementation, "
+            "ran tests, and summarized the fix."
+        ),
+        reference_steps=[
+            "read the issue",
+            "inspect relevant files",
+            "modify the implementation",
+            "run tests",
+            "summarize the fix",
+        ],
     )
 
     print("score:", result.score)
@@ -22,4 +31,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
