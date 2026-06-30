@@ -1,4 +1,4 @@
-# Reward Align Scorer
+# ⚡ Reward Align Scorer
 
 <p align="right">
   <a href="./README.md">English</a> |
@@ -25,7 +25,7 @@ interpretable reward score
 
 It is designed for RLHF, RLAIF, GRPO, and agent post-training workloads where responses can be long, reward functions must run online, and calling an LLM Judge for every sample creates a training bottleneck.
 
-## Why This Exists
+## 🚧 Why This Exists
 
 Modern RL post-training often optimizes long responses, tool traces, or multi-step reasoning. The trainer can generate rollouts quickly, but reward scoring may become the slow side of the pipeline:
 
@@ -38,7 +38,7 @@ Modern RL post-training often optimizes long responses, tool traces, or multi-st
 
 The goal is not to replace all Judge calls. A practical deployment uses this scorer for high-confidence structured checks and falls back to LLM Judge for ambiguous samples.
 
-## Key Advantages
+## ✨ Key Advantages
 
 | Compared with | Advantage |
 | --- | --- |
@@ -47,13 +47,13 @@ The goal is not to replace all Judge calls. A practical deployment uses this sco
 | Sentence-level greedy matching | Uses sliding windows and monotonic DP to reduce cascade errors |
 | Black-box reward scores | Returns matched/unmatched steps, alignment path, match rate, and order rate |
 
-## Performance Reference
+## 📊 Performance Reference
 
 In an actual RL rollout setting with `batch_size=32`, `rollout.n=8`, and `mean_response_length≈3096`, one step of reward compute finished within a sub-second range. This makes the scorer practical as an online reward pre-scorer during rollout, reducing reward-side waiting and pipeline bubbles in synchronous training.
 
 > Latency depends on the embedding model, GPU/NPU hardware, window configuration, cache hit rate, and response length. Run `benchmarks/benchmark_latency.py` in your own training environment for calibration.
 
-## Features
+## 🧩 Features
 
 - Normalized `0~1` score by default; task-specific reward functions can apply external weights.
 - Long-response scoring for `max_response_length=4096/8192` style training.
@@ -64,7 +64,7 @@ In an actual RL rollout setting with `batch_size=32`, `rollout.n=8`, and `mean_r
 - veRL-compatible `compute_score` entrypoint.
 - Interpretable output: matched steps, unmatched steps, alignment path, match/order rates.
 
-## Installation
+## 📦 Installation
 
 ```bash
 pip install -e .
@@ -77,7 +77,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 ```python
 from reward_align_scorer import ScorerConfig, SemanticRewardScorer
@@ -105,7 +105,7 @@ print(result.unmatched_steps)
 
 `result.score` is normalized to `0~1` by default. If semantic alignment should be a dominant reward term, apply an external task weight, for example `final_reward += 3.0 * result.score`.
 
-## veRL Integration
+## 🔌 veRL Integration
 
 Copy or import `reward_align_scorer.verl_adapter.compute_score` as a reward function:
 
@@ -138,7 +138,7 @@ score = compute_score(
 )
 ```
 
-## Suitable Scenarios
+## 🎯 Suitable Scenarios
 
 - Agent trajectory reward: expected actions vs. actual trace.
 - Tool-use workflows: search, read, edit, test, report.
@@ -155,6 +155,6 @@ Less suitable:
 - Pure subjective preference ranking.
 - High-risk factual verification without structured evidence or Judge fallback.
 
-## Project Status
+## 🛠️ Project Status
 
 This is an early-stage plugin scaffold. The core algorithm and veRL entrypoint are implemented; production users should calibrate thresholds with task-specific hard negatives and benchmark latency inside their actual rollout environment.

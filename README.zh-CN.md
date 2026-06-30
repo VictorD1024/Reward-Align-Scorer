@@ -1,4 +1,4 @@
-# Reward Align Scorer
+# ⚡ Reward Align Scorer
 
 <p align="right">
   <a href="./README.md">English</a> |
@@ -22,7 +22,7 @@ monotonic alignment DP
 score + matched/unmatched diagnostics
 ```
 
-## 解决什么痛点
+## 🚧 解决什么痛点
 
 在后训练里，policy rollout 之后必须立刻打 reward。随着 `max_response_length=4096/8192` 变得常见，reward function 很容易成为训练慢点：
 
@@ -34,7 +34,7 @@ score + matched/unmatched diagnostics
 
 Reward Align Scorer 的目标不是替代所有 Judge，而是作为一个 **低延迟、高可解释的前置 reward scorer**：高置信结构化样本直接打分，低置信或边界样本再 fallback 到 LLM Judge。
 
-## 核心优势
+## ✨ 核心优势
 
 | 对比对象 | Reward Align Scorer 的优势 |
 | --- | --- |
@@ -43,13 +43,13 @@ Reward Align Scorer 的目标不是替代所有 Judge，而是作为一个 **低
 | 句子级贪心匹配 | 用滑动窗口保留跨句语义，用单调 DP 搜索全局顺序路径，减少级联错配 |
 | 黑盒 reward 分数 | 输出 matched/unmatched steps、alignment path、match/order rate，方便定位 reward 问题 |
 
-## 性能参考
+## 📊 性能参考
 
 在实际 RL rollout 场景中，使用 `batch_size=32`、`rollout.n=8`、`mean_response_length≈3096` 的配置，一个 step 的 reward compute 可以在零点几秒内完成。这个结果说明该 scorer 适合作为 rollout 阶段的在线 reward pre-scorer，用于降低同步训练中 reward 侧等待造成的 pipeline bubble。
 
 > 具体延迟会随 embedding 模型、GPU/NPU 型号、窗口参数、缓存命中率和 response 长度变化。建议在自己的训练环境中运行 `benchmarks/benchmark_latency.py` 做标定。
 
-## 核心方案
+## 🧠 核心方案
 
 | 模块 | 作用 | 解决的问题 |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ Reward Align Scorer 的目标不是替代所有 Judge，而是作为一个 **低
 | LRU Cache | 缓存模型、文本 embedding 和热点 reference | 降低重复 rollout / 高频 prompt 的 reward 开销 |
 | Diagnostics | 输出 matched/unmatched steps、alignment path、match/order rate | 让 reward 可调试、可解释、可做数据诊断 |
 
-## 适配场景
+## 🎯 适配场景
 
 它适合 **有参考结构** 的后训练任务：你能把期望行为表示成 reference steps、checklist、trajectory 或 evidence points。
 
@@ -103,14 +103,14 @@ search -> open source -> extract evidence -> answer with citation
 
 高置信样本用本 scorer 快速打分；低置信样本、低 margin 样本、unmatched steps 过多的样本再交给 LLM Judge。这样可以降低 Judge 调用频率，同时保留复杂样本上的判断能力。
 
-## 不适合的场景
+## ⚠️ 不适合的场景
 
 - 没有 reference steps / checklist / trajectory 的开放式创作。
 - 纯主观偏好排序，比如“哪个回答更优雅”。
 - 需要严格符号验证的任务，比如代码功能正确性、数学等价证明。
 - 高风险事实核验且没有结构化 evidence 或 Judge fallback。
 
-## 特性
+## 🧩 特性
 
 - 默认输出归一化到 `0~1`，业务侧可通过外部权重组合到最终 reward。
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
@@ -121,7 +121,7 @@ search -> open source -> extract evidence -> answer with citation
 - veRL-compatible `compute_score` 入口，可放入 `verl/utils/reward_score`。
 - 输出 `matched_steps`、`unmatched_steps`、`alignment_path`、`match_rate`、`order_rate`。
 
-## 安装
+## 📦 安装
 
 ```bash
 pip install -e .
@@ -134,7 +134,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## 快速开始
+## 🚀 快速开始
 
 ```python
 from reward_align_scorer import ScorerConfig, SemanticRewardScorer
@@ -162,7 +162,7 @@ print(result.unmatched_steps)
 
 默认 `result.score` 是 `0~1` 的归一化语义对齐分数。如果希望它作为主 reward 项，可以在业务 reward function 中乘以外部权重，例如 `final_reward += 3.0 * result.score`。
 
-## veRL 集成
+## 🔌 veRL 集成
 
 可以直接导入 `reward_align_scorer.verl_adapter.compute_score` 作为 reward function：
 
@@ -207,7 +207,7 @@ verl/utils/reward_score/semantic_align.py
 integrations/verl/utils/reward_score/semantic_align.py
 ```
 
-## 项目边界
+## 🧭 项目边界
 
 这个项目更像 **Reward Pre-Scorer / Reward Router**，不是万能 Judge。推荐生产用法：
 
@@ -217,6 +217,6 @@ low confidence / ambiguous sample -> LLM Judge fallback
 symbolic correctness task          -> verifier / unit tests
 ```
 
-## 项目状态
+## 🛠️ 项目状态
 
 当前是早期开源插件骨架。核心算法、veRL 入口、示例、测试和 benchmark 脚本已经提供；生产使用前建议基于具体任务构造 hard negatives 校准阈值，并在真实 rollout 环境中统计 latency、cache hit rate、fallback ratio 和 reward 分布。
