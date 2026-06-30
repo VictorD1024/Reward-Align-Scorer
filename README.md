@@ -11,6 +11,8 @@ Reward Align Scorer converts slow, per-sample Judge-style step evaluation into a
 
 Compared with direct `LLM-as-Judge`, it is faster, lighter on memory, and easier to batch. Compared with pure rule matching, it is more semantic: it can handle paraphrases, partial step coverage, and ordered matching in long responses. During rollout, it can work as a lightweight reward pre-scorer to reduce reward-side waiting and pipeline bubbles.
 
+Unlike final-answer sparse rewards, it produces **step-level dense semantic signals**: each reference step can be matched, missed, or diagnosed with an aligned response window.
+
 ```text
 reference steps/checklist/trajectory
         x
@@ -56,6 +58,7 @@ In an actual RL rollout setting with `batch_size=32`, `rollout.n=8`, and `mean_r
 ## 🧩 Features
 
 - Normalized `0~1` score by default; task-specific reward functions can apply external weights.
+- Step-level dense semantic reward signals instead of final-answer-only sparse rewards.
 - Long-response scoring for `max_response_length=4096/8192` style training.
 - Sliding-window semantic matching instead of hard sentence boundaries.
 - Monotonic alignment DP to avoid greedy cascade errors.

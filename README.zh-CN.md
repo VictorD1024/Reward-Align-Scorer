@@ -10,6 +10,8 @@
 
 相比直接使用 `LLM-as-Judge`，它响应更快、显存和计算占用更低；相比纯规则匹配，它能识别语义改写、局部步骤覆盖和顺序关系。在 rollout 阶段，它可以作为轻量级 reward pre-scorer，显著减少 reward 侧等待造成的 pipeline bubble。
 
+不同于只在最终答案上打分的稀疏 reward，它提供 **步骤级稠密语义奖励信号**：每个 reference step 都可以被匹配、漏检，或定位到对应的 response window。
+
 ```text
 reference steps / checklist / trajectory
         x
@@ -113,6 +115,7 @@ search -> open source -> extract evidence -> answer with citation
 ## 🧩 特性
 
 - 默认输出归一化到 `0~1`，业务侧可通过外部权重组合到最终 reward。
+- 提供步骤级稠密语义奖励信号，而不是只给 final-answer sparse reward。
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
 - 滑动窗口语义匹配替代硬句子边界。
 - Monotonic Alignment DP 替代局部贪心匹配。
