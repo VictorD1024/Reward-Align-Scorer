@@ -13,17 +13,22 @@ Compared with direct `LLM-as-Judge`, it is faster, lighter on memory, and easier
 
 Unlike final-answer sparse rewards, it produces **step-level dense semantic signals**: each reference step can be matched, missed, or diagnosed with an aligned response window.
 
-```text
-reference steps/checklist/trajectory
-        x
-overlapping response windows
-        ->
-embedding similarity matrix
-        ->
-monotonic alignment DP
-        ->
-interpretable reward score
+```mermaid
+flowchart TD
+    R["Reference steps"] --> E
+    W["Long response<br/>→ sliding windows"] --> E
+    subgraph GPU["GPU / Ascend NPU"]
+        E["Embedding + LRU cache"] --> S["Similarity matrix"]
+    end
+    S --> D
+    subgraph CPU["CPU · numpy"]
+        D["Monotonic DP"]
+    end
+    D --> O["match_rate × order_rate"]
+    O --> Score["Interpretable reward"]
 ```
+
+Similarity matrix is computed as a **single batched GEMM** on GPU/NPU; the **monotonic DP runs on CPU (numpy)** to avoid per-cell host↔device sync — ~50× faster than running the DP loop on GPU. Sliding windows use a coarse→fine two-pass scheme with early-exit, and an LRU cache reuses embeddings across rollout workers.
 
 It is designed for RLHF, RLAIF, GRPO, and agent post-training workloads where responses can be long, reward functions must run online, and calling an LLM Judge for every sample creates a training bottleneck.
 
@@ -106,7 +111,10 @@ print(result.matched_steps)
 print(result.unmatched_steps)
 ```
 
-`result.score` is normalized to `0~1` by default. If semantic alignment should be a dominant reward term, apply an external task weight, for example `final_reward += 3.0 * result.score`.
+`result.score` is normalized to `0~1` by default and combines coverage and order: `score = match_rate * order_rate * max_score`. If semantic alignment should be a dominant reward term, apply an external task weight, for example `final_reward += 3.0 * result.score`.
+
+- `match_rate`: fraction of reference steps that found a matching response window.
+- `order_rate`: among matched steps, the fraction of adjacent reference-step pairs whose best response windows appear in the expected order (`1.0` = fully ordered, `0.0` = fully reversed). This is computed from each matched step's strongest window, independent of the monotonic DP path, so it can detect scrambled responses even when `match_rate` is high.
 
 ## 🔌 veRL Integration
 

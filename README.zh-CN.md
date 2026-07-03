@@ -12,17 +12,22 @@
 
 不同于只在最终答案上打分的稀疏 reward，它提供 **步骤级稠密语义奖励信号**：每个 reference step 都可以被匹配、漏检，或定位到对应的 response window。
 
-```text
-reference steps / checklist / trajectory
-        x
-long response windows
-        ->
-embedding similarity matrix
-        ->
-monotonic alignment DP
-        ->
-score + matched/unmatched diagnostics
+```mermaid
+flowchart TD
+    R["Reference steps"] --> E
+    W["长响应<br/>→ 滑动窗口"] --> E
+    subgraph GPU["GPU / Ascend NPU"]
+        E["编码 + LRU 缓存"] --> S["相似度矩阵"]
+    end
+    S --> D
+    subgraph CPU["CPU · numpy"]
+        D["单调对齐 DP"]
+    end
+    D --> O["match_rate × order_rate"]
+    O --> Score["可解释 reward"]
 ```
+
+相似度矩阵在 **GPU/NPU 上以单次批量 GEMM** 计算；**单调 DP 跑在 CPU (numpy)** 上以规避逐格 host↔device 同步 —— 比在 GPU 上跑 DP 循环快约 50×。滑动窗口采用粗→细两段并支持提前退出，LRU 缓存在多个 rollout worker 间复用编码。
 
 ## 🚧 解决什么痛点
 
@@ -163,7 +168,10 @@ print(result.matched_steps)
 print(result.unmatched_steps)
 ```
 
-默认 `result.score` 是 `0~1` 的归一化语义对齐分数。如果希望它作为主 reward 项，可以在业务 reward function 中乘以外部权重，例如 `final_reward += 3.0 * result.score`。
+默认 `result.score` 是 `0~1` 的归一化语义对齐分数，综合覆盖与顺序：`score = match_rate * order_rate * max_score`。如果希望它作为主 reward 项，可以在业务 reward function 中乘以外部权重，例如 `final_reward += 3.0 * result.score`。
+
+- `match_rate`：reference steps 中找到匹配响应窗口的比例。
+- `order_rate`：在已匹配的 steps 中，相邻 reference step 对其最佳响应窗口按预期顺序出现的比例（`1.0` = 完全有序，`0.0` = 完全逆序）。该指标基于每个匹配 step 的最强窗口计算，独立于单调 DP 路径，因此即使 `match_rate` 很高也能识别出响应顺序被打乱的情况。
 
 ## 🔌 veRL 集成
 
