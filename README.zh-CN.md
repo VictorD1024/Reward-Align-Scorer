@@ -29,6 +29,23 @@ flowchart TD
 
 相似度矩阵在 **GPU/NPU 上以单次批量 GEMM** 计算；**单调 DP 跑在 CPU (numpy)** 上以规避逐格 host↔device 同步 —— 比在 GPU 上跑 DP 循环快约 50×。滑动窗口采用粗→细两段并支持提前退出，LRU 缓存在多个 rollout worker 间复用编码。
 
+## ⚡ 为什么这么快
+
+长响应 RL reward 的瓶颈不是算力，而是**每条样本一次自回归 LLM-Judge 调用**（解码 200–500 token，单样本约秒级），且在整个 rollout batch 上串行。Reward Align Scorer 把它换成一条批量张量流水线：
+
+| 阶段 | 替代了什么 | 加速机制 |
+| --- | --- | --- |
+| 滑动窗口 | 整段响应编码 | 把变长的 4096/8192 响应切成有界的定长块 → 批量编码和单次 GEMM 才成为可能 |
+| 批量编码 + 单次 GEMM | N×M 次 Judge 调用 | 对所有 steps + windows 做一次编码器前向，再 `sim = step_emb @ win_emb.T` —— 自回归解码被稠密矩阵乘替换，单样本成本约低 2 个数量级 |
+| 单调 DP 跑在 CPU (numpy) | GPU 逐格 DP 循环 | DP 矩阵很小（`num_steps × num_windows`），在 CPU 上跑规避逐格 host↔device 同步 —— 实测比 torch 逐格循环快约 50× |
+| LRU embedding 缓存 | 每个样本重新编码 | reference steps 在整个 rollout batch 和训练 step 间复用；长跑 worker 的编码成本趋近于零 |
+| 粗→细 + 提前退出 | 永远跑细扫 | 全匹配样本直接跳过细扫 |
+| Judge fallback 路由 | 每个样本都走 Judge | 只有模糊样本走慢路径，Judge 调用数降一个数量级 |
+
+端到端看，单样本 reward 从 **~秒级 (Judge) 降到 ~毫秒级 (scorer)**，整个 rollout step 的 reward（`batch_size × rollout.n` 条样本）在亚秒级完成 —— trainer GPU 不再等 reward，消除同步训练的 pipeline bubble。
+
+> ~50× DP 提速是在真实 `monotonic_align` 递推上实测的，不是无关算子的微基准。端到端数字请在你自己的环境里跑 `benchmarks/benchmark_latency.py`。
+
 ## 🚧 解决什么痛点
 
 在后训练里，policy rollout 之后必须立刻打 reward。随着 `max_response_length=4096/8192` 变得常见，reward function 很容易成为训练慢点：

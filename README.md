@@ -32,6 +32,23 @@ Similarity matrix is computed as a **single batched GEMM** on GPU/NPU; the **mon
 
 It is designed for RLHF, RLAIF, GRPO, and agent post-training workloads where responses can be long, reward functions must run online, and calling an LLM Judge for every sample creates a training bottleneck.
 
+## ⚡ Why It's Fast
+
+The bottleneck in long-response RL reward is not raw FLOPs — it's **one autoregressive LLM-Judge call per sample** (decoding 200–500 tokens, ~seconds per sample), serialized across the whole rollout batch. Reward Align Scorer replaces that with a batched tensor pipeline:
+
+| Stage | Replaces | Speedup mechanism |
+| --- | --- | --- |
+| Sliding windows | Whole-response encoding | Turns a variable-length 4096/8192 response into a bounded set of fixed-length chunks → batched encoding and a single GEMM become possible |
+| Batched embedding + single GEMM | N×M Judge calls | One encoder forward over all steps + windows, then `sim = step_emb @ win_emb.T` — autoregressive decode replaced by dense matrix multiply (~2 orders of magnitude cheaper per sample) |
+| Monotonic DP on CPU (numpy) | GPU per-cell DP loop | The DP matrix is small (`num_steps × num_windows`); running on CPU avoids per-cell host↔device sync — measured ~50× faster than the torch per-cell loop |
+| LRU embedding cache | Re-encoding every sample | Reference steps are reused across the whole rollout batch and across training steps; long-running workers approach zero encoding cost |
+| Coarse→fine + early-exit | Always-fine matching | Fully-matched samples skip the fine pass entirely |
+| Judge fallback routing | Scoring every sample with Judge | Only ambiguous samples hit the slow path; Judge calls drop by an order of magnitude |
+
+End-to-end, per-sample reward moves from **~seconds (Judge) to ~milliseconds (scorer)**, so a whole rollout step's reward (`batch_size × rollout.n` samples) finishes in the sub-second range — the trainer GPU no longer waits on reward, eliminating the synchronous-training pipeline bubble.
+
+> The ~50× DP figure is measured on the actual `monotonic_align` recurrence, not a microbenchmark of unrelated ops. Run `benchmarks/benchmark_latency.py` in your own environment for end-to-end numbers.
+
 ## 🚧 Why This Exists
 
 Modern RL post-training often optimizes long responses, tool traces, or multi-step reasoning. The trainer can generate rollouts quickly, but reward scoring may become the slow side of the pipeline:
