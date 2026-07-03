@@ -15,8 +15,8 @@ Unlike final-answer sparse rewards, it produces **step-level dense semantic sign
 
 ```mermaid
 flowchart TD
-    R["Reference steps"] --> E
-    W["Long response<br/>→ sliding windows"] --> E
+    R["Ground Truth Steps"] --> E
+    W["Long Response<br/>→ Sliding Windows"] --> E
     subgraph GPU["GPU / Ascend NPU"]
         E["Embedding + LRU cache"] --> S["Similarity matrix"]
     end
