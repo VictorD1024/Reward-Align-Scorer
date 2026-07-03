@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart TD
-    R["Reference steps"] --> E
+    R["Ground Truth Steps"] --> E
     W["长响应<br/>→ 滑动窗口"] --> E
     subgraph GPU["GPU / Ascend NPU"]
         E["编码 + LRU 缓存"] --> S["相似度矩阵"]
