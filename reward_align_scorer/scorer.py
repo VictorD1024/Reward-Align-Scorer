@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import torch
 
 from .embedding import EmbeddingBackend, TextEmbedder
@@ -58,7 +59,13 @@ def sliding_windows(text: str, window: int, stride: int, max_windows: int = 256)
 
 
 def monotonic_align(sim_matrix: torch.Tensor, threshold: float = 0.65) -> Alignment:
-    """Find a globally ordered step-window alignment path."""
+    """Find a globally ordered step-window alignment path.
+
+    The DP runs on CPU with numpy. The similarity matrix is typically tiny
+    (num_steps x num_windows, e.g. 30x256), and doing the DP on the GPU would
+    trigger a host-device sync per cell, which dominates runtime. Keeping it on
+    CPU avoids that sync entirely while preserving the same recurrence.
+    """
     if sim_matrix.ndim != 2:
         raise ValueError("sim_matrix must be a 2D tensor")
 
@@ -66,32 +73,36 @@ def monotonic_align(sim_matrix: torch.Tensor, threshold: float = 0.65) -> Alignm
     if num_steps == 0 or num_windows == 0:
         return Alignment(path=[], match_rate=0.0, order_rate=0.0, score=0.0)
 
-    device = sim_matrix.device
-    dp = torch.zeros((num_steps + 1, num_windows + 1), device=device)
-    bp = torch.zeros((num_steps + 1, num_windows + 1), dtype=torch.int8, device=device)
+    sim = sim_matrix.detach().to("cpu", dtype=torch.float32).numpy()
+    gain = np.where(sim >= threshold, sim, 0.0)
+
+    dp = np.zeros((num_steps + 1, num_windows + 1), dtype=np.float32)
+    bp = np.zeros((num_steps + 1, num_windows + 1), dtype=np.int8)
 
     for i in range(1, num_steps + 1):
+        dp_i = dp[i]
+        dp_prev = dp[i - 1]
+        bp_i = bp[i]
+        gain_i = gain[i - 1]
         for j in range(1, num_windows + 1):
-            skip_window = dp[i, j - 1]
-            skip_step = dp[i - 1, j]
-            sim = sim_matrix[i - 1, j - 1]
-            match_gain = torch.where(sim >= threshold, sim, sim.new_tensor(0.0))
-            match = dp[i - 1, j - 1] + match_gain
-
-            if match >= skip_window and match >= skip_step and match_gain > 0:
-                dp[i, j] = match
-                bp[i, j] = 1
+            skip_window = dp_i[j - 1]
+            skip_step = dp_prev[j]
+            g = gain_i[j - 1]
+            match = dp_prev[j - 1] + g
+            if g > 0 and match >= skip_window and match >= skip_step:
+                dp_i[j] = match
+                bp_i[j] = 1
             elif skip_window >= skip_step:
-                dp[i, j] = skip_window
-                bp[i, j] = 2
+                dp_i[j] = skip_window
+                bp_i[j] = 2
             else:
-                dp[i, j] = skip_step
-                bp[i, j] = 3
+                dp_i[j] = skip_step
+                bp_i[j] = 3
 
     path: list[tuple[int, int]] = []
     i, j = num_steps, num_windows
     while i > 0 and j > 0:
-        move = int(bp[i, j].item())
+        move = int(bp[i, j])
         if move == 1:
             path.append((i - 1, j - 1))
             i -= 1
@@ -103,11 +114,22 @@ def monotonic_align(sim_matrix: torch.Tensor, threshold: float = 0.65) -> Alignm
 
     path.reverse()
     match_rate = len(path) / num_steps
+
+    matched_step_indices = sorted({idx for idx, _ in path})
+    if not matched_step_indices:
+        order_rate = 0.0
+    elif len(matched_step_indices) == 1:
+        order_rate = 1.0
+    else:
+        best_windows = sim[matched_step_indices].argmax(axis=1).tolist()
+        ordered_pairs = sum(1 for a, b in zip(best_windows, best_windows[1:]) if a < b)
+        order_rate = ordered_pairs / (len(matched_step_indices) - 1)
+
     return Alignment(
         path=path,
         match_rate=match_rate,
-        order_rate=match_rate,
-        score=float(dp[num_steps, num_windows].detach().cpu()),
+        order_rate=order_rate,
+        score=float(dp[num_steps, num_windows]),
     )
 
 
@@ -160,7 +182,7 @@ class SemanticRewardScorer:
         matched_idx = {idx for idx, _ in alignment.path}
 
         return RewardScore(
-            score=alignment.order_rate * self.config.max_score,
+            score=alignment.match_rate * alignment.order_rate * self.config.max_score,
             match_rate=alignment.match_rate,
             order_rate=alignment.order_rate,
             matched_steps=[step for idx, step in enumerate(reference_steps) if idx in matched_idx],
