@@ -38,6 +38,12 @@ dependencies = [
   "transformers>=4.38"
 ]
 
+[project.urls]
+Homepage = "https://github.com/VictorD1024/Reward-Align-Scorer"
+Repository = "https://github.com/VictorD1024/Reward-Align-Scorer"
+Issues = "https://github.com/VictorD1024/Reward-Align-Scorer/issues"
+Changelog = "https://github.com/VictorD1024/Reward-Align-Scorer/releases"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=7.0",
