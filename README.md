@@ -67,10 +67,12 @@ In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`,
 
 - Normalized `0~1` score; apply external task weights for reward shaping.
 - Each reference step may carry **multiple candidate actions** — any one matching credits the step (for steps realizable by different tools or phrasings).
+- **Multi-trajectory scoring** — pass several valid step sequences; the best-matching one wins. Handles branching agent plans.
 - Coarse→fine sliding windows with early-exit; LRU embedding cache.
 - GPU / Ascend NPU / CPU device selection.
 - veRL-compatible `compute_score` entrypoint.
 - Interpretable output: matched/unmatched steps, alignment path, match/order rates.
+- **Recitation-hacking audit tool** — `benchmarks/dump_scores.py` checks whether high-scored responses genuinely executed the steps or just recited their names.
 
 ## 📦 Installation
 
@@ -129,6 +131,45 @@ result = scorer.score(
     ],
 )
 ```
+
+## Multi-Path Scoring (Branching Agent Plans)
+
+When a task admits multiple valid action sequences (different branches), pass every trajectory — the scorer evaluates each, and the best-matching one wins. A step within a trajectory can still carry multiple candidate actions.
+
+```mermaid
+flowchart LR
+    S["Task"] --> B1["Branch A"]
+    S --> B2["Branch B"]
+    B1 --> A1["reproduce bug"]
+    B1 --> A2["patch code"]
+    B1 --> A3["run tests"]
+    B2 --> C1["reproduce bug"]
+    B2 --> C2["add workaround"]
+    B2 --> C3["run tests"]
+    A3 --> Eval["score vs. response"]
+    C3 --> Eval
+    Eval --> Pick["pick max score"]
+```
+
+```python
+from reward_align_scorer.trajectories import score_trajectories
+
+result = score_trajectories(
+    scorer,
+    response="I reproduced the issue, added a workaround, and ran the tests.",
+    trajectories=[
+        ["reproduce bug", "patch code", "run tests"],         # branch A
+        ["reproduce bug", "add workaround", "run tests"],     # branch B
+    ],
+)
+print(result.best_index)   # → 1 (took branch B)
+print(result.score)        # → branch B's score
+print(result.result.matched_steps)
+```
+
+Win criterion is `(score, match_rate, order_rate)` descending — a fully matching trajectory beats one with marginal score advantage but worse coverage.
+
+Cost: response windows encoded once and reused across trajectories via the LRU cache. Runtime scales with *distinct step strings*, not trajectories.
 
 ## 🔌 veRL Integration
 

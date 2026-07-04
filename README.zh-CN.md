@@ -118,9 +118,11 @@ search -> open source -> extract evidence -> answer with citation
 
 - 默认输出归一化到 `0~1`，业务侧可通过外部权重组合到最终 reward。
 - 每个 reference step 可携带**多个候选 action** —— 任一候选匹配即算该步通过（适用于同一步可用不同工具或措辞完成的场景）。
+- **多轨迹打分** —— 支持传入多条合法 step 序列，取最佳匹配路径作为 reward。适用于有分支选择的 agent 任务。
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
 - 支持 GPU / Ascend NPU / CPU 设备选择。
 - veRL-compatible `compute_score` 入口，可放入 `verl/utils/reward_score`。
+- **复读欺诈审计工具** —— `benchmarks/dump_scores.py` 检查高分响应是真正执行了步骤，还是仅仅复读了步骤名称。
 
 ## 📦 安装
 
@@ -179,6 +181,45 @@ result = scorer.score(
     ],
 )
 ```
+
+## 多路径打分（分支 Agent 轨迹）
+
+当同一个任务有多个合法步骤序列（不同分支）时，传入所有可能的轨迹：scorer 逐一打分，最佳匹配者胜出。轨迹内部的 step 仍可携带多个候选 action。
+
+```mermaid
+flowchart LR
+    S["Task"] --> B1["分支 A"]
+    S --> B2["分支 B"]
+    B1 --> A1["复现 bug"]
+    B1 --> A2["修改代码"]
+    B1 --> A3["运行测试"]
+    B2 --> C1["复现 bug"]
+    B2 --> C2["加 workaround"]
+    B2 --> C3["运行测试"]
+    A3 --> Eval["与 response 对比打分"]
+    C3 --> Eval
+    Eval --> Pick["取最高分"]
+```
+
+```python
+from reward_align_scorer.trajectories import score_trajectories
+
+result = score_trajectories(
+    scorer,
+    response="I reproduced the issue, added a workaround, and ran the tests.",
+    trajectories=[
+        ["reproduce bug", "patch code", "run tests"],         # 分支 A
+        ["reproduce bug", "add workaround", "run tests"],     # 分支 B
+    ],
+)
+print(result.best_index)   # → 1（走了分支 B）
+print(result.score)        # → 分支 B 的 reward 分数
+print(result.result.matched_steps)
+```
+
+胜出判定按 `(score, match_rate, order_rate)` 降序排列 —— 全匹配的轨迹比分数略高但覆盖不全的轨迹优先。
+
+成本：response 窗口只需编码一次，跨轨迹复用（依赖 embedder 的 LRU 缓存）。运行时开销随**不同 step 字符串数**增长，不随轨迹数增长。
 
 ## 🔌 veRL 集成
 
