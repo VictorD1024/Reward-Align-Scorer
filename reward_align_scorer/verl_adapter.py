@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 from collections import Counter
@@ -33,12 +35,30 @@ def _get_scorer() -> Optional[SemanticRewardScorer]:
     return _SCORER
 
 
-def parse_reference_steps(extra_info: dict) -> list[str]:
-    source = extra_info.get("reference_steps", extra_info.get("operation", []))
+def parse_reference_steps(extra_info: dict) -> list:
+    """Read reference steps from ``extra_info``.
+
+    Key priority: ``reference_steps`` (canonical) > ``actions`` (Agentic-RL alias).
+    Each step may be a string (single required action) or a list of strings
+    (candidate actions; any one matching credits the step).
+    """
+    source = extra_info.get("reference_steps")
+    if source is None:
+        source = extra_info.get("actions", [])
     if isinstance(source, str):
         return [s.strip() for s in re.split(r"[，,；;\n]", source) if s.strip()]
     if isinstance(source, list):
-        return [str(s).strip() for s in source if str(s).strip()]
+        normalized = []
+        for item in source:
+            if isinstance(item, list):
+                cands = [str(c).strip() for c in item if str(c).strip()]
+                if cands:
+                    normalized.append(cands)
+            else:
+                s = str(item).strip()
+                if s:
+                    normalized.append(s)
+        return normalized
     return []
 
 

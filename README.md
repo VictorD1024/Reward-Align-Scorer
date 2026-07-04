@@ -5,13 +5,7 @@
   <a href="./README.zh-CN.md">中文</a>
 </p>
 
-Fast and interpretable semantic reward scoring for long-response RL training.
-
-Reward Align Scorer converts slow, per-sample Judge-style step evaluation into a batched semantic alignment problem:
-
-Compared with direct `LLM-as-Judge`, it is faster, lighter on memory, and easier to batch. Compared with pure rule matching, it is more semantic: it can handle paraphrases, partial step coverage, and ordered matching in long responses. During rollout, it can work as a lightweight reward pre-scorer to reduce reward-side waiting and pipeline bubbles.
-
-Unlike final-answer sparse rewards, it produces **step-level dense semantic signals**: each reference step can be matched, missed, or diagnosed with an aligned response window.
+**Dense, white-box semantic reward scoring for long-response RL training.** Reward Align Scorer turns slow, per-sample LLM-Judge step evaluation into a batched embedding-similarity + monotonic-alignment problem, and returns a step-level interpretable signal instead of one black-box score at the final answer.
 
 ```mermaid
 flowchart TD
@@ -30,64 +24,53 @@ flowchart TD
 
 Similarity matrix is computed as a **single batched GEMM** on GPU/NPU; the **monotonic DP runs on CPU (numpy)** to avoid per-cell host↔device sync — ~50× faster than running the DP loop on GPU. Sliding windows use a coarse→fine two-pass scheme with early-exit, and an LRU cache reuses embeddings across rollout workers.
 
-It is designed for RLHF, RLAIF, GRPO, and agent post-training workloads where responses can be long, reward functions must run online, and calling an LLM Judge for every sample creates a training bottleneck.
+## ✨ Advantages
+
+**Dense, white-box reward.** Instead of one black-box score at the final answer, every reference step is reported as matched or unmatched with its aligned response window, plus `match_rate`, `order_rate`, and the full alignment path — so you can tell whether the model missed a step, did the right steps in the wrong order, or padded the response with repetition.
+
+| | LLM-as-Judge | Rule / string matching | Final-answer sparse reward | **Reward Align Scorer** |
+| --- | --- | --- | --- | --- |
+| Granularity | per-sample verdict | binary match | one score at the end | step-level dense |
+| Semantics | strong | brittle to paraphrases | none | embedding similarity |
+| Order awareness | via prompt | fragile / greedy | none | monotonic DP + `order_rate` |
+| Interpretability | reasoning text | hit/miss | black-box | matched/unmatched steps + path |
+| Latency / sample | ~seconds (autoregressive) | fast | fast | ~ms (batched GEMM + CPU DP) |
+| Batching | hard (per-sample calls) | n/a | n/a | one encoder forward + one GEMM |
+| Cost | high | low | low | low (LRU cache → ~0 on repeats) |
+
+Built for RLHF, RLAIF, GRPO, and agent post-training where responses are long and reward must run online. It does not replace every Judge call — use it for high-confidence structured samples and fall back to LLM Judge for ambiguous ones.
 
 ## ⚡ Why It's Fast
 
-The bottleneck in long-response RL reward is not raw FLOPs — it's **one autoregressive LLM-Judge call per sample** (decoding 200–500 tokens, ~seconds per sample), serialized across the whole rollout batch. Reward Align Scorer replaces that with a batched tensor pipeline:
+The bottleneck is not raw FLOPs — it's one autoregressive LLM-Judge call per sample, serialized across the rollout batch. Reward Align Scorer replaces that with a batched tensor pipeline:
 
 | Stage | Replaces | Speedup mechanism |
 | --- | --- | --- |
 | Sliding windows | Whole-response encoding | Turns a variable-length 4096/8192 response into a bounded set of fixed-length chunks → batched encoding and a single GEMM become possible |
 | Batched embedding + single GEMM | N×M Judge calls | One encoder forward over all steps + windows, then `sim = step_emb @ win_emb.T` — autoregressive decode replaced by dense matrix multiply (~2 orders of magnitude cheaper per sample) |
 | Monotonic DP on CPU (numpy) | GPU per-cell DP loop | The DP matrix is small (`num_steps × num_windows`); running on CPU avoids per-cell host↔device sync — measured ~50× faster than the torch per-cell loop |
-| LRU embedding cache | Re-encoding every sample | Reference steps are reused across the whole rollout batch and across training steps; long-running workers approach zero encoding cost |
+| LRU embedding cache | Re-encoding every sample | Reference steps reused across the rollout batch and across training steps; long-running workers approach zero encoding cost |
 | Coarse→fine + early-exit | Always-fine matching | Fully-matched samples skip the fine pass entirely |
 | Judge fallback routing | Scoring every sample with Judge | Only ambiguous samples hit the slow path; Judge calls drop by an order of magnitude |
 
-End-to-end, per-sample reward moves from **~seconds (Judge) to ~milliseconds (scorer)**, so a whole rollout step's reward (`batch_size × rollout.n` samples) finishes in the sub-second range — the trainer GPU no longer waits on reward, eliminating the synchronous-training pipeline bubble.
+End-to-end, per-sample reward moves from **~seconds (Judge) to ~milliseconds (scorer)**, so a whole rollout step's reward finishes in the sub-second range — eliminating the synchronous-training pipeline bubble.
 
-> The ~50× DP figure is measured on the actual `monotonic_align` recurrence, not a microbenchmark of unrelated ops. Run `benchmarks/benchmark_latency.py` in your own environment for end-to-end numbers.
-
-## 🚧 Why This Exists
-
-Modern RL post-training often optimizes long responses, tool traces, or multi-step reasoning. The trainer can generate rollouts quickly, but reward scoring may become the slow side of the pipeline:
-
-| Reward method | Common issue |
-| --- | --- |
-| LLM-as-Judge | Accurate but slow and expensive for every rollout |
-| String/rule matching | Fast but brittle to paraphrases |
-| Sentence split + greedy match | Fragile on long responses and cascade errors |
-| Reward Align Scorer | Batched embedding similarity + sliding windows + monotonic DP |
-
-The goal is not to replace all Judge calls. A practical deployment uses this scorer for high-confidence structured checks and falls back to LLM Judge for ambiguous samples.
-
-## ✨ Key Advantages
-
-| Compared with | Advantage |
-| --- | --- |
-| LLM-as-Judge | Lower latency, lower memory footprint, easier batching for online rollout scoring |
-| Pure rule matching | Handles paraphrases, local semantic coverage, and key segments in long responses |
-| Sentence-level greedy matching | Uses sliding windows and monotonic DP to reduce cascade errors |
-| Black-box reward scores | Returns matched/unmatched steps, alignment path, match rate, and order rate |
+> The ~50× DP figure is measured on the actual `monotonic_align` recurrence. Run `benchmarks/benchmark_latency.py --breakdown` in your own environment for end-to-end numbers.
 
 ## 📊 Performance Reference
 
-In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`, `rollout.n=8`, and `mean_response_length≈4096`, one step of reward compute finished within a sub-second range. This makes the scorer practical as an online reward pre-scorer during rollout, reducing reward-side waiting and pipeline bubbles in synchronous training.
+In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`, `rollout.n=8`, and `mean_response_length≈4096`, one step of reward compute finished within a sub-second range.
 
-> Latency depends on the embedding model, GPU/NPU hardware, window configuration, cache hit rate, and response length. Run `benchmarks/benchmark_latency.py` in your own training environment for calibration.
+> Latency depends on the embedding model, GPU/NPU hardware, window configuration, cache hit rate, and response length. Run `benchmarks/benchmark_latency.py --breakdown` in your own training environment for calibration.
 
 ## 🧩 Features
 
-- Normalized `0~1` score by default; task-specific reward functions can apply external weights.
-- Step-level dense semantic reward signals instead of final-answer-only sparse rewards.
-- Long-response scoring for `max_response_length=4096/8192` style training.
-- Sliding-window semantic matching instead of hard sentence boundaries.
-- Monotonic alignment DP to avoid greedy cascade errors.
+- Normalized `0~1` score; apply external task weights for reward shaping.
+- Each reference step may carry **multiple candidate actions** — any one matching credits the step (for steps realizable by different tools or phrasings).
+- Coarse→fine sliding windows with early-exit; LRU embedding cache.
 - GPU / Ascend NPU / CPU device selection.
-- LRU embedding cache for long-running reward workers.
 - veRL-compatible `compute_score` entrypoint.
-- Interpretable output: matched steps, unmatched steps, alignment path, match/order rates.
+- Interpretable output: matched/unmatched steps, alignment path, match/order rates.
 
 ## 📦 Installation
 
@@ -133,6 +116,20 @@ print(result.unmatched_steps)
 - `match_rate`: fraction of reference steps that found a matching response window.
 - `order_rate`: among matched steps, the fraction of adjacent reference-step pairs whose best response windows appear in the expected order (`1.0` = fully ordered, `0.0` = fully reversed). This is computed from each matched step's strongest window, independent of the monotonic DP path, so it can detect scrambled responses even when `match_rate` is high.
 
+A step may carry multiple candidate actions (any one matching credits the step):
+
+```python
+result = scorer.score(
+    response="I searched the web, extracted the key evidence, and answered with a citation.",
+    reference_steps=[
+        "search for sources",
+        ["open web source", "open knowledge base"],  # either tool counts
+        "extract evidence",
+        "answer with citation",
+    ],
+)
+```
+
 ## 🔌 veRL Integration
 
 Copy or import `reward_align_scorer.verl_adapter.compute_score` as a reward function:
@@ -165,6 +162,8 @@ score = compute_score(
     },
 )
 ```
+
+`extra_info` accepts `reference_steps` (canonical) or `actions` (Agentic-RL alias). To drop the wrapper into a veRL source tree, copy `integrations/verl/utils/reward_score/semantic_align.py` to `verl/utils/reward_score/semantic_align.py` — it is a one-line re-export of `compute_score`.
 
 ## 🎯 Suitable Scenarios
 

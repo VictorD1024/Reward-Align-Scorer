@@ -5,12 +5,7 @@
   <a href="./README.zh-CN.md">中文</a>
 </p>
 
-面向 **长响应 RL 后训练** 的可解释语义 Reward Scorer。  
-它把慢速、逐条、难批处理的 `LLM-as-Judge` / 规则式步骤评估，转化为 **embedding 矩阵检索 + 滑动窗口语义对齐 + 单调 DP** 问题，用于缓解 RLHF / RLAIF / GRPO 训练中的 reward 侧瓶颈。
-
-相比直接使用 `LLM-as-Judge`，它响应更快、显存和计算占用更低；相比纯规则匹配，它能识别语义改写、局部步骤覆盖和顺序关系。在 rollout 阶段，它可以作为轻量级 reward pre-scorer，显著减少 reward 侧等待造成的 pipeline bubble。
-
-不同于只在最终答案上打分的稀疏 reward，它提供 **步骤级稠密语义奖励信号**：每个 reference step 都可以被匹配、漏检，或定位到对应的 response window。
+**面向长响应 RL 后训练的密集白盒语义 Reward Scorer。** 它把慢速、逐条、难批处理的 `LLM-as-Judge` / 规则式步骤评估，转化为 **embedding 矩阵检索 + 滑动窗口语义对齐 + 单调 DP** 问题，返回步骤级可解释信号，而不是只在最终答案上给一个黑盒分数。
 
 ```mermaid
 flowchart TD
@@ -29,9 +24,25 @@ flowchart TD
 
 相似度矩阵在 **GPU/NPU 上以单次批量 GEMM** 计算；**单调 DP 跑在 CPU (numpy)** 上以规避逐格 host↔device 同步 —— 比在 GPU 上跑 DP 循环快约 50×。滑动窗口采用粗→细两段并支持提前退出，LRU 缓存在多个 rollout worker 间复用编码。
 
+## ✨ 优势
+
+**密集白盒 reward。** 不再只在最终答案上给一个黑盒分数，而是每个 reference step 都报出 matched/unmatched 及其对应的 response window，外加 `match_rate`、`order_rate` 和完整 alignment path —— 可以直接看出模型是漏步骤、顺序错、还是重复灌水。
+
+| | LLM-as-Judge | 规则 / 字符串匹配 | 最终答案稀疏 reward | **Reward Align Scorer** |
+| --- | --- | --- | --- | --- |
+| 粒度 | 每样本一个判定 | 二元命中 | 末尾一个分数 | 步骤级密集 |
+| 语义 | 强 | 改写即失效 | 无 | embedding 相似度 |
+| 顺序感知 | 靠 prompt 引导 | 脆弱 / 贪心 | 无 | 单调 DP + `order_rate` |
+| 可解释性 | reasoning 文本 | 命中/未命中 | 黑盒 | matched/unmatched steps + path |
+| 单样本延迟 | ~秒级（自回归） | 快 | 快 | ~毫秒（批量 GEMM + CPU DP） |
+| 批处理 | 难（逐样本调用） | 不适用 | 不适用 | 一次编码 + 一次 GEMM |
+| 成本 | 高 | 低 | 低 | 低（LRU 缓存命中后趋近 0） |
+
+面向 RLHF / RLAIF / GRPO / agent 后训练，响应长且 reward 必须在线运行。它不替代所有 Judge 调用 —— 高置信结构化样本用它直接打分，模糊样本 fallback 到 LLM Judge。
+
 ## ⚡ 为什么这么快
 
-长响应 RL reward 的瓶颈不是算力，而是**每条样本一次自回归 LLM-Judge 调用**（解码 200–500 token，单样本约秒级），且在整个 rollout batch 上串行。Reward Align Scorer 把它换成一条批量张量流水线：
+瓶颈不是算力，而是**每条样本一次自回归 LLM-Judge 调用**，在整个 rollout batch 上串行。Reward Align Scorer 把它换成一条批量张量流水线：
 
 | 阶段 | 替代了什么 | 加速机制 |
 | --- | --- | --- |
@@ -42,46 +53,15 @@ flowchart TD
 | 粗→细 + 提前退出 | 永远跑细扫 | 全匹配样本直接跳过细扫 |
 | Judge fallback 路由 | 每个样本都走 Judge | 只有模糊样本走慢路径，Judge 调用数降一个数量级 |
 
-端到端看，单样本 reward 从 **~秒级 (Judge) 降到 ~毫秒级 (scorer)**，整个 rollout step 的 reward（`batch_size × rollout.n` 条样本）在亚秒级完成 —— trainer GPU 不再等 reward，消除同步训练的 pipeline bubble。
+端到端看，单样本 reward 从 **~秒级 (Judge) 降到 ~毫秒级 (scorer)**，整个 rollout step 的 reward 在亚秒级完成 —— 消除同步训练的 pipeline bubble。
 
-> ~50× DP 提速是在真实 `monotonic_align` 递推上实测的，不是无关算子的微基准。端到端数字请在你自己的环境里跑 `benchmarks/benchmark_latency.py`。
-
-## 🚧 解决什么痛点
-
-在后训练里，policy rollout 之后必须立刻打 reward。随着 `max_response_length=4096/8192` 变得常见，reward function 很容易成为训练慢点：
-
-- **LLM Judge 太慢**：每条 rollout 都调用 Judge，推理延迟高，成本高，容易让训练主流程等待。
-- **规则匹配太脆**：字符串包含判断无法处理改写、同义表达和长回答里的局部语义。
-- **句子切分不可靠**：长回答中关键语义可能跨越标点边界，按句切分会漏召回。
-- **贪心顺序匹配会级联错误**：前一个 reference step 匹配到错误位置后，后续步骤被迫从错误位置继续找。
-- **Reward 不可解释**：只返回一个分数，很难判断模型是漏步骤、顺序错、重复灌水，还是 reward 规则误判。
-
-Reward Align Scorer 的目标不是替代所有 Judge，而是作为一个 **低延迟、高可解释的前置 reward scorer**：高置信结构化样本直接打分，低置信或边界样本再 fallback 到 LLM Judge。
-
-## ✨ 核心优势
-
-| 对比对象 | Reward Align Scorer 的优势 |
-| --- | --- |
-| LLM-as-Judge | 更低延迟、更低显存占用、更容易批处理，适合 rollout 阶段在线打分 |
-| 纯规则匹配 | 不依赖完全字符串命中，能处理同义改写、局部语义覆盖和长回答中的关键片段 |
-| 句子级贪心匹配 | 用滑动窗口保留跨句语义，用单调 DP 搜索全局顺序路径，减少级联错配 |
-| 黑盒 reward 分数 | 输出 matched/unmatched steps、alignment path、match/order rate，方便定位 reward 问题 |
+> ~50× DP 提速是在真实 `monotonic_align` 递推上实测的。端到端数字请在你自己的环境里跑 `benchmarks/benchmark_latency.py --breakdown`。
 
 ## 📊 性能参考
 
-在实际 RL rollout 场景中，基于 **32B 参数模型**，使用 `batch_size=32`、`rollout.n=8`、`mean_response_length≈4096` 的配置，一个 step 的 reward compute 可以在零点几秒内完成。这个结果说明该 scorer 适合作为 rollout 阶段的在线 reward pre-scorer，用于降低同步训练中 reward 侧等待造成的 pipeline bubble。
+在实际 RL rollout 场景中，基于 **32B 参数模型**，使用 `batch_size=32`、`rollout.n=8`、`mean_response_length≈4096` 的配置，一个 step 的 reward compute 可以在零点几秒内完成。
 
-> 具体延迟会随 embedding 模型、GPU/NPU 型号、窗口参数、缓存命中率和 response 长度变化。建议在自己的训练环境中运行 `benchmarks/benchmark_latency.py` 做标定。
-
-## 🧠 核心方案
-
-| 模块 | 作用 | 解决的问题 |
-| --- | --- | --- |
-| Sliding Windows | 把长回答切成重叠语义窗口 | 避免句子硬切分导致的信息断裂 |
-| Embedding Matrix Search | `steps_emb @ windows_emb.T` 批量计算相似度 | 把逐条判断变成 GPU/NPU 友好的矩阵计算 |
-| Monotonic Alignment DP | 在相似度矩阵上找顺序一致的全局路径 | 避免贪心匹配 cascade error |
-| LRU Cache | 缓存模型、文本 embedding 和热点 reference | 降低重复 rollout / 高频 prompt 的 reward 开销 |
-| Diagnostics | 输出 matched/unmatched steps、alignment path、match/order rate | 让 reward 可调试、可解释、可做数据诊断 |
+> 具体延迟会随 embedding 模型、GPU/NPU 型号、窗口参数、缓存命中率和 response 长度变化。建议在自己的训练环境中运行 `benchmarks/benchmark_latency.py --breakdown` 做标定。
 
 ## 🎯 适配场景
 
@@ -137,14 +117,10 @@ search -> open source -> extract evidence -> answer with citation
 ## 🧩 特性
 
 - 默认输出归一化到 `0~1`，业务侧可通过外部权重组合到最终 reward。
-- 提供步骤级稠密语义奖励信号，而不是只给 final-answer sparse reward。
+- 每个 reference step 可携带**多个候选 action** —— 任一候选匹配即算该步通过（适用于同一步可用不同工具或措辞完成的场景）。
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
-- 滑动窗口语义匹配替代硬句子边界。
-- Monotonic Alignment DP 替代局部贪心匹配。
 - 支持 GPU / Ascend NPU / CPU 设备选择。
-- LRU embedding cache 支持长时间运行的 reward worker。
 - veRL-compatible `compute_score` 入口，可放入 `verl/utils/reward_score`。
-- 输出 `matched_steps`、`unmatched_steps`、`alignment_path`、`match_rate`、`order_rate`。
 
 ## 📦 安装
 
@@ -190,6 +166,20 @@ print(result.unmatched_steps)
 - `match_rate`：reference steps 中找到匹配响应窗口的比例。
 - `order_rate`：在已匹配的 steps 中，相邻 reference step 对其最佳响应窗口按预期顺序出现的比例（`1.0` = 完全有序，`0.0` = 完全逆序）。该指标基于每个匹配 step 的最强窗口计算，独立于单调 DP 路径，因此即使 `match_rate` 很高也能识别出响应顺序被打乱的情况。
 
+一个 step 也可以携带多个候选 action（任一匹配即算该步通过）：
+
+```python
+result = scorer.score(
+    response="我先在网上搜索，提取了关键证据，然后带引用作答。",
+    reference_steps=[
+        "搜索来源",
+        ["打开网页来源", "打开知识库来源"],  # 两种工具都算这一步通过
+        "提取证据",
+        "带引用作答",
+    ],
+)
+```
+
 ## 🔌 veRL 集成
 
 可以直接导入 `reward_align_scorer.verl_adapter.compute_score` 作为 reward function：
@@ -234,6 +224,8 @@ verl/utils/reward_score/semantic_align.py
 ```text
 integrations/verl/utils/reward_score/semantic_align.py
 ```
+
+`extra_info` 接受 `reference_steps`（主键）或 `actions`（Agentic-RL 别名）。要把 wrapper 放进 veRL 源码树，把 `integrations/verl/utils/reward_score/semantic_align.py` 拷到 `verl/utils/reward_score/semantic_align.py` —— 它是 `compute_score` 的一行 re-export。
 
 ## 🧭 项目边界
 

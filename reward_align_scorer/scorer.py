@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -155,6 +157,30 @@ class RewardScore:
     stats: dict
 
 
+def _normalize_steps(steps) -> list:
+    """Normalize reference steps to a list where each step is either a string
+    (single required action) or a list of strings (candidate actions; any one
+    matching credits the step). Empty entries are dropped."""
+    normalized = []
+    for step in steps:
+        if isinstance(step, (list, tuple)):
+            cands = [str(c).strip() for c in step if str(c).strip()]
+            if cands:
+                normalized.append(cands)
+        else:
+            s = str(step).strip()
+            if s:
+                normalized.append(s)
+    return normalized
+
+
+def _step_repr(step) -> str:
+    """Render a step (str or candidate list) as a single string for diagnostics."""
+    if isinstance(step, (list, tuple)):
+        return " | ".join(str(c).strip() for c in step if str(c).strip())
+    return str(step).strip()
+
+
 class SemanticRewardScorer:
     """Embedding matrix + sliding windows + monotonic DP reward scorer."""
 
@@ -167,30 +193,76 @@ class SemanticRewardScorer:
             cache_size=self.config.text_cache_size,
         )
 
-    def _score_once(self, reference_steps: list[str], response: str, window: int, stride: int, threshold: float):
+    def _score_once(self, reference_steps, response: str, window: int, stride: int, threshold: float):
         windows = sliding_windows(response, window, stride, max_windows=self.config.windows.max_windows)
+        num_steps = len(reference_steps)
         if not reference_steps or not windows:
-            return RewardScore(0.0, 0.0, 0.0, [], reference_steps, [], windows, {"num_windows": len(windows)})
+            return RewardScore(
+                0.0, 0.0, 0.0, [], [_step_repr(s) for s in reference_steps], [], windows,
+                {"num_windows": len(windows)},
+            )
 
-        step_emb = self.embedder.encode(reference_steps, use_cache=True)
+        # Each step is either a string or a list of candidate action strings.
+        step_candidates = []
+        for step in reference_steps:
+            if isinstance(step, (list, tuple)):
+                cands = [str(c).strip() for c in step if str(c).strip()]
+            else:
+                cands = [str(step).strip()] if str(step).strip() else []
+            step_candidates.append(cands)
+
+        if all(not c for c in step_candidates):
+            return RewardScore(
+                0.0, 0.0, 0.0, [], [_step_repr(s) for s in reference_steps], [], windows,
+                {"num_windows": len(windows)},
+            )
+
+        flat = [c for cands in step_candidates for c in cands]
+        flat_emb = self.embedder.encode(flat, use_cache=True)
         win_emb = self.embedder.encode([w[0] for w in windows], use_cache=True)
-        if step_emb is None or win_emb is None:
-            return RewardScore(0.0, 0.0, 0.0, [], reference_steps, [], windows, {"num_windows": len(windows)})
+        if flat_emb is None or win_emb is None:
+            return RewardScore(
+                0.0, 0.0, 0.0, [], [_step_repr(s) for s in reference_steps], [], windows,
+                {"num_windows": len(windows)},
+            )
 
-        sim_matrix = torch.mm(step_emb, win_emb.T)
+        # Per-candidate similarity, reduced to per-step by max over candidates.
+        cand_sim = torch.mm(flat_emb, win_emb.T)
+        offsets = []
+        o = 0
+        for cands in step_candidates:
+            offsets.append((o, o + len(cands)))
+            o += len(cands)
+        sim_matrix = torch.stack(
+            [cand_sim[s:e].max(dim=0).values if e > s else cand_sim.new_zeros(len(windows)) for s, e in offsets],
+            dim=0,
+        )
+
         alignment = monotonic_align(sim_matrix, threshold=threshold)
         matched_idx = {idx for idx, _ in alignment.path}
+        path_by_step = {i: j for i, j in alignment.path}
+
+        matched_steps = []
+        for idx in sorted(matched_idx):
+            s, e = offsets[idx]
+            win_j = path_by_step[idx]
+            cand_idx = int(cand_sim[s:e, win_j].argmax().item())
+            matched_steps.append(flat[s + cand_idx])
+
+        unmatched_steps = [
+            _step_repr(step) for idx, step in enumerate(reference_steps) if idx not in matched_idx
+        ]
 
         return RewardScore(
             score=alignment.match_rate * alignment.order_rate * self.config.max_score,
             match_rate=alignment.match_rate,
             order_rate=alignment.order_rate,
-            matched_steps=[step for idx, step in enumerate(reference_steps) if idx in matched_idx],
-            unmatched_steps=[step for idx, step in enumerate(reference_steps) if idx not in matched_idx],
+            matched_steps=matched_steps,
+            unmatched_steps=unmatched_steps,
             alignment_path=alignment.path,
             windows=windows,
             stats={
-                "num_steps": len(reference_steps),
+                "num_steps": num_steps,
                 "num_windows": len(windows),
                 "window": window,
                 "stride": stride,
@@ -201,8 +273,8 @@ class SemanticRewardScorer:
             },
         )
 
-    def score(self, response: str, reference_steps: list[str], coarse_to_fine: bool = True) -> RewardScore:
-        reference_steps = [str(step).strip() for step in reference_steps if str(step).strip()]
+    def score(self, response: str, reference_steps, coarse_to_fine: bool = True) -> RewardScore:
+        reference_steps = _normalize_steps(reference_steps)
         if not coarse_to_fine:
             return self._score_once(
                 reference_steps,
