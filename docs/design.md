@@ -1,5 +1,10 @@
 # Design
 
+<p align="right">
+  <a href="./design.md">English</a> |
+  <a href="./design.zh-CN.md">中文</a>
+</p>
+
 Reward Align Scorer is built around one engineering choice:
 
 > Convert structured reward judgment into batched semantic alignment before calling a slow Judge.
