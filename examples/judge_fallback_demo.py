@@ -1,21 +1,33 @@
 from reward_align_scorer.verl_adapter import compute_score
 
 
-def should_fallback_to_judge(details: dict) -> bool:
-    if details["step_match_rate"] < 0.5:
-        return True
-    if len(details["unmatched_steps"]) >= 2:
-        return True
-    return False
+def main():
+    steps = [
+        "summarize the reported bug symptoms",
+        "inspect relevant files",
+        "patch the implementation",
+        "run tests",
+    ]
+    details = compute_score(
+        solution_str=(
+            "<think>plan fix</think> "
+            "The bug shows up as a signed overflow near INT64_MIN. "
+            "I inspected src/module.py and patched the boundary check. "
+            "pytest tests/test_module.py passed."
+        ),
+        extra_info={"reference_steps": steps},
+        return_details=True,
+    )
+
+    if details["fallback_recommended"]:
+        print("route → LLM Judge")
+        print("reasons:", details["fallback_reasons"])
+    else:
+        print("route → semantic reward")
+        print("score:", details["score"], "confidence:", round(details["confidence"], 3))
+
+    print("step tiers:", details["step_tiers"])
 
 
-details = compute_score(
-    solution_str="<think>plan</think> read the task, inspect files, patch code, and summarize.",
-    extra_info={"reference_steps": ["read the task", "inspect files", "patch code", "run tests", "summarize"]},
-    return_details=True,
-)
-
-if should_fallback_to_judge(details):
-    print("fallback to LLM Judge")
-else:
-    print("use semantic reward", details["score"])
+if __name__ == "__main__":
+    main()

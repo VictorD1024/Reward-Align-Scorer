@@ -80,3 +80,45 @@ def test_scorer_multi_candidate_step_unmatched_reports_all_options():
 
     assert result.match_rate == pytest.approx(0.5)
     assert "edit code | refactor module" in result.unmatched_steps
+
+
+def _make_scorer(require_trace: bool) -> SemanticRewardScorer:
+    s = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    s.config = ScorerConfig(
+        threshold=0.65,
+        require_trace=require_trace,
+        windows=WindowConfig(fine_window=16, fine_stride=8),
+    )
+    s.embedder = MockEmbedder()
+    s._trace_detector = None
+    return s
+
+
+def test_scorer_require_trace_kills_padded_recitation():
+    # Padded recitation: restates each step with intention verbs, no tool calls
+    # and no causal analysis. The embedding CAN map these windows to the steps
+    # (proved by the require_trace=False case matching), so it is the trace
+    # gate — not the embedder — that denies the recitation.
+    recitation = "I will read task. I will edit code. I will run tests."
+    steps = ["read task", "edit code", "run tests"]
+
+    gated = _make_scorer(require_trace=True).score(recitation, steps, coarse_to_fine=False)
+    ungated = _make_scorer(require_trace=False).score(recitation, steps, coarse_to_fine=False)
+
+    assert gated.match_rate == 0.0
+    assert ungated.match_rate > 0.0
+
+
+def test_scorer_require_trace_keeps_genuine_with_evidence():
+    # Each step's window carries evidence: reasoning ("because") for read,
+    # tool tag (<edit_file>) for edit, output marker (Output:) for test.
+    genuine = "read because bug found. edit <edit_file> patch. test Output: passed."
+    steps = ["read task", "edit code", "run tests"]
+
+    gated = _make_scorer(require_trace=True).score(genuine, steps, coarse_to_fine=False)
+    ungated = _make_scorer(require_trace=False).score(genuine, steps, coarse_to_fine=False)
+
+    # Trace evidence keeps the gated score at least as high as ungated coverage
+    # (no step is falsely denied), and strictly above the recitation's 0.0.
+    assert gated.match_rate > 0.0
+    assert gated.match_rate >= ungated.match_rate - 1e-6

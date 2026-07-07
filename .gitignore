@@ -12,4 +12,6 @@ build/
 outputs/
 logs/
 *.log
+.demo_models/
+data/
 

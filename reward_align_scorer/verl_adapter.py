@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Optional
 
 from .embedding import load_embedding_backend
+from .confidence import assess_confidence, ConfidenceReport
 from .scorer import ScorerConfig, SemanticRewardScorer
 
 
@@ -30,6 +31,7 @@ def _get_scorer() -> Optional[SemanticRewardScorer]:
             max_score=float(os.environ.get("REWARD_ALIGN_MAX_SCORE", "1.0")),
             max_length=int(os.environ.get("REWARD_ALIGN_MAX_LENGTH", "128")),
             encode_batch_size=int(os.environ.get("REWARD_ALIGN_BATCH_SIZE", "128")),
+            require_trace=os.environ.get("REWARD_ALIGN_REQUIRE_TRACE", "0") == "1",
         ),
     )
     return _SCORER
@@ -101,13 +103,19 @@ def compute_score(solution_str, ground_truth=None, extra_info=None, return_detai
         "step_match_rate": 0.0,
         "step_order_rate": 0.0,
         "matched_steps": [],
-        "unmatched_steps": steps,
+        "unmatched_steps": [_step_label(s) for s in steps],
         "repetition_rate": 0.0,
         "penalty": 0.0,
         "think_len": len(think_text),
+        "confidence": 0.0,
+        "fallback_recommended": True,
+        "fallback_reasons": [],
+        "step_tiers": [],
+        "routing_signals": {},
         "debug": {},
     }
 
+    semantic = None
     scorer = _get_scorer()
     if scorer is not None and steps and answer_text:
         semantic = scorer.score(answer_text, steps)
@@ -117,16 +125,46 @@ def compute_score(solution_str, ground_truth=None, extra_info=None, return_detai
         details["matched_steps"] = semantic.matched_steps
         details["unmatched_steps"] = semantic.unmatched_steps
         details["debug"] = semantic.stats
+        if semantic.stats.get("trace_gate") == "denied":
+            details["trace_gate"] = "denied"
     elif steps and answer_text:
-        matches = sum(1 for step in steps if step in answer_text)
+        matches = sum(1 for step in steps if _step_label(step) in answer_text)
         details["step_match_rate"] = matches / len(steps)
         details["step_order_rate"] = details["step_match_rate"]
         details["semantic_score"] = details["step_match_rate"]
+        details["fallback_reasons"] = ["no_embedding_backend"]
 
     details["repetition_rate"], details["penalty"] = _repetition_penalty(answer_text)
     details["score"] = max(details["semantic_score"] + details["penalty"], 0.0)
 
+    if semantic is not None:
+        report = assess_confidence(semantic, steps, response=answer_text)
+    elif not steps or not answer_text:
+        report = ConfidenceReport(
+            confidence=0.0,
+            fallback_recommended=True,
+            reasons=["missing_steps_or_response"],
+        )
+    else:
+        report = ConfidenceReport(
+            confidence=0.0,
+            fallback_recommended=True,
+            reasons=details["fallback_reasons"] or ["no_embedding_backend"],
+        )
+
+    details["confidence"] = report.confidence
+    details["fallback_recommended"] = report.fallback_recommended
+    details["fallback_reasons"] = report.reasons
+    details["step_tiers"] = report.step_tiers
+    details["routing_signals"] = report.signals
+
     if return_details:
         return details
     return details["score"]
+
+
+def _step_label(step) -> str:
+    if isinstance(step, list):
+        return " | ".join(str(s).strip() for s in step if str(s).strip())
+    return str(step).strip()
 

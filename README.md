@@ -72,7 +72,10 @@ In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`,
 - GPU / Ascend NPU / CPU device selection.
 - veRL-compatible `compute_score` entrypoint.
 - Interpretable output: matched/unmatched steps, alignment path, match/order rates.
-- **Recitation-hacking audit tool** — `benchmarks/dump_scores.py` checks whether high-scored responses genuinely executed the steps or just recited their names.
+- **Recitation-hacking defense (optional trace gate)** — enable `ScorerConfig(require_trace=True)` (or `REWARD_ALIGN_REQUIRE_TRACE=1` in the veRL adapter) to score responses 0 when they contain neither tool/execution evidence (tool tags, git diff markers, code, file paths, test verdicts) nor reasoning/analytical evidence (causal connectors, verb-anchored `root cause is`-style phrases) anywhere. Kills lazy/padded recitation with zero recall loss on genuine PR-fix data (see [docs/design.md](docs/design.md#recitation-defense-p0-optional)).
+- **Recitation-hacking audit tool** — `benchmarks/dump_scores.py --require-trace` reports a `denied` column and `[recall watch]` line quantifying how many genuine steps the gate falsely denies, so patterns can be calibrated on real rollout data.
+- **Confidence routing + Judge fallback** — `assess_confidence()` and built-in `fallback_recommended` in `compute_score(..., return_details=True)` route ambiguous samples to LLM-as-Judge; see [Step Design Guidelines](docs/design.md#reference-step-design-guidelines).
+- **Reward quality benchmark** — `benchmarks/reward_quality.py` reports score/confidence/fallback rates on genuine vs recitation samples.
 
 ## 📦 Installation
 
@@ -171,6 +174,32 @@ Win criterion is `(score, match_rate, order_rate)` descending — a fully matchi
 
 Cost: response windows encoded once and reused across trajectories via the LRU cache. Runtime scales with *distinct step strings*, not trajectories.
 
+## Confidence Routing (Judge Fallback)
+
+Semantic reward is fast but not always trustworthy. Use the built-in router:
+
+```python
+from reward_align_scorer import assess_confidence, classify_steps
+from reward_align_scorer.verl_adapter import compute_score
+
+# Audit step design before training
+print(classify_steps([
+    "summarize the reported bug symptoms",  # reasoning — good
+    "read the linked issue",                # proxy — weak signal
+    "run pytest on affected tests",         # observable — strong
+]))
+
+details = compute_score(solution_str, extra_info={"reference_steps": steps}, return_details=True)
+if details["fallback_recommended"]:
+    reward = llm_judge(solution_str, rubric)  # low match_rate, low margin, too many proxy steps, …
+else:
+    reward = details["score"]
+```
+
+Run `python benchmarks/reward_quality.py --model-path ...` to measure fallback rates on your data.
+
+See [Reference Step Design Guidelines](docs/design.md#reference-step-design-guidelines) for which steps are observable vs proxy.
+
 ## 🔌 veRL Integration
 
 Copy or import `reward_align_scorer.verl_adapter.compute_score` as a reward function:
@@ -225,4 +254,9 @@ Less suitable:
 
 ## 🛠️ Project Status
 
-This is an early-stage plugin scaffold. The core algorithm and veRL entrypoint are implemented; production users should calibrate thresholds with task-specific hard negatives and benchmark latency inside their actual rollout environment.
+Alpha-stage plugin with core algorithm, veRL entrypoint, confidence routing, step-design guidelines, and calibration benchmarks. Before production:
+
+1. Audit reference steps with `classify_steps()` — minimize proxy steps.
+2. Calibrate `threshold` and `RoutingConfig` on task hard negatives.
+3. Run `benchmarks/reward_quality.py` and `benchmarks/benchmark_latency.py` in your rollout environment.
+4. Monitor `fallback_recommended` rate — target low fallback on genuine data, high fallback on ambiguous/recitation samples.

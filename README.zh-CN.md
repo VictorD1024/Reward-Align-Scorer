@@ -122,7 +122,10 @@ search -> open source -> extract evidence -> answer with citation
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
 - 支持 GPU / Ascend NPU / CPU 设备选择。
 - veRL-compatible `compute_score` 入口，可放入 `verl/utils/reward_score`。
-- **复读欺诈审计工具** —— `benchmarks/dump_scores.py` 检查高分响应是真正执行了步骤，还是仅仅复读了步骤名称。
+- **复读欺诈防御（可选 trace gate）** —— 开启 `ScorerConfig(require_trace=True)`（或在 veRL adapter 中设 `REWARD_ALIGN_REQUIRE_TRACE=1`），对全文既无工具/执行痕迹（工具标签、git diff 标记、代码、文件路径、测试结论）也无推理/分析痕迹（因果连接词、动词锚定的 `root cause is` 类短语）的响应直接判 0 分。杀死懒散/填充式复读，且在真实 PR-fix 数据上对 genuine 零召回损失（详见 [docs/design.zh-CN.md](docs/design.zh-CN.md#复读防御p0可选)）。
+- **复读欺诈审计工具** —— `benchmarks/dump_scores.py --require-trace` 输出 `denied` 列与 `[recall watch]` 行，量化 gate 误杀了多少真实步骤，便于在真实 rollout 数据上标定 pattern。
+- **置信度路由 + Judge fallback** —— `assess_confidence()` 与 `compute_score(..., return_details=True)` 内置 `fallback_recommended`，将模糊样本路由到 LLM-as-Judge；见 [Step 设计指南](docs/design.zh-CN.md#reference-step-设计指南)。
+- **Reward 质量 benchmark** —— `benchmarks/reward_quality.py` 统计 genuine vs recitation 的 score/confidence/fallback 率。
 
 ## 📦 安装
 
@@ -221,6 +224,31 @@ print(result.result.matched_steps)
 
 成本：response 窗口只需编码一次，跨轨迹复用（依赖 embedder 的 LRU 缓存）。运行时开销随**不同 step 字符串数**增长，不随轨迹数增长。
 
+## 置信度路由（Judge Fallback）
+
+语义 reward 快，但不是所有样本都该盲信。使用内置路由器：
+
+```python
+from reward_align_scorer import assess_confidence, classify_steps
+from reward_align_scorer.verl_adapter import compute_score
+
+print(classify_steps([
+    "summarize the reported bug symptoms",  # reasoning — 较好
+    "read the linked issue",                # proxy — 弱信号
+    "run pytest on affected tests",         # observable — 强信号
+]))
+
+details = compute_score(solution_str, extra_info={"reference_steps": steps}, return_details=True)
+if details["fallback_recommended"]:
+    reward = llm_judge(solution_str, rubric)
+else:
+    reward = details["score"]
+```
+
+运行 `python benchmarks/reward_quality.py --model-path ...` 在你的数据上测量 fallback 率。
+
+详见 [Reference Step 设计指南](docs/design.zh-CN.md#reference-step-设计指南)。
+
 ## 🔌 veRL 集成
 
 可以直接导入 `reward_align_scorer.verl_adapter.compute_score` 作为 reward function：
@@ -280,4 +308,9 @@ symbolic correctness task          -> verifier / unit tests
 
 ## 🛠️ 项目状态
 
-当前是早期开源插件骨架。核心算法、veRL 入口、示例、测试和 benchmark 脚本已经提供；生产使用前建议基于具体任务构造 hard negatives 校准阈值，并在真实 rollout 环境中统计 latency、cache hit rate、fallback ratio 和 reward 分布。
+Alpha 阶段插件：核心算法、veRL 入口、置信度路由、step 设计指南、标定 benchmark 已具备。上生产前建议：
+
+1. 用 `classify_steps()` 审计 reference steps，尽量减少 proxy step。
+2. 在任务 hard negatives 上标定 `threshold` 与 `RoutingConfig`。
+3. 在真实 rollout 环境运行 `benchmarks/reward_quality.py` 与 `benchmarks/benchmark_latency.py`。
+4. 监控 `fallback_recommended` 率 —— genuine 应低 fallback，ambiguous/recitation 应高 fallback。

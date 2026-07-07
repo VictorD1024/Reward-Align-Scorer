@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from .embedding import EmbeddingBackend, TextEmbedder
+from .trace_detector import TraceDetector
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class ScorerConfig:
     max_length: int = 128
     encode_batch_size: int = 128
     text_cache_size: int = 8192
+    require_trace: bool = False
     windows: WindowConfig = field(default_factory=WindowConfig)
 
 
@@ -192,6 +194,12 @@ class SemanticRewardScorer:
             max_length=self.config.max_length,
             cache_size=self.config.text_cache_size,
         )
+        self._trace_detector: Optional[TraceDetector] = None
+
+    def _get_trace_detector(self) -> TraceDetector:
+        if self._trace_detector is None:
+            self._trace_detector = TraceDetector()
+        return self._trace_detector
 
     def _score_once(self, reference_steps, response: str, window: int, stride: int, threshold: float):
         windows = sliding_windows(response, window, stride, max_windows=self.config.windows.max_windows)
@@ -242,6 +250,16 @@ class SemanticRewardScorer:
         matched_idx = {idx for idx, _ in alignment.path}
         path_by_step = {i: j for i, j in alignment.path}
 
+        matched_sims: list[float] = []
+        matched_margins: list[float] = []
+        for step_idx, win_idx in alignment.path:
+            sim_val = float(sim_matrix[step_idx, win_idx].item())
+            matched_sims.append(sim_val)
+            row = sim_matrix[step_idx].clone()
+            row[win_idx] = -1.0
+            second_best = float(row.max().item()) if len(windows) > 1 else 0.0
+            matched_margins.append(max(sim_val - second_best, 0.0))
+
         matched_steps = []
         for idx in sorted(matched_idx):
             s, e = offsets[idx]
@@ -266,8 +284,13 @@ class SemanticRewardScorer:
                 "num_windows": len(windows),
                 "window": window,
                 "stride": stride,
+                "threshold": threshold,
                 "mean_sim": float(sim_matrix.mean().detach().cpu()),
                 "max_sim": float(sim_matrix.max().detach().cpu()),
+                "matched_sims": matched_sims,
+                "mean_matched_sim": float(sum(matched_sims) / len(matched_sims)) if matched_sims else 0.0,
+                "min_matched_sim": float(min(matched_sims)) if matched_sims else 0.0,
+                "mean_margin": float(sum(matched_margins) / len(matched_margins)) if matched_margins else 0.0,
                 "alignment_score": alignment.score,
                 "embedding_cache": self.embedder.cache.stats(),
             },
@@ -275,6 +298,36 @@ class SemanticRewardScorer:
 
     def score(self, response: str, reference_steps, coarse_to_fine: bool = True) -> RewardScore:
         reference_steps = _normalize_steps(reference_steps)
+
+        # P0 response-level trace gate: a response that contains NEITHER
+        # tool/execution evidence NOR reasoning/analytical evidence anywhere is
+        # treated as recitation and scored 0. This is applied to the whole
+        # response rather than per matched window because (a) preparation steps
+        # like "read the issue" have no execution evidence by nature, and (b) a
+        # step's evidence is frequently in a different window than its best
+        # semantic match — both caused systematic false negatives in the earlier
+        # per-step variant (65% of genuine PR-fix samples lost a step). Threat
+        # model: lazy/padded recitation. Partial faking is out of scope.
+        if self.config.require_trace:
+            detector = self._get_trace_detector()
+            flat_steps = []
+            for s in reference_steps:
+                if isinstance(s, (list, tuple)):
+                    flat_steps += [str(c).strip() for c in s if str(c).strip()]
+                else:
+                    flat_steps.append(str(s).strip())
+            if not detector.has_trace(response or "", flat_steps):
+                return RewardScore(
+                    score=0.0,
+                    match_rate=0.0,
+                    order_rate=0.0,
+                    matched_steps=[],
+                    unmatched_steps=[_step_repr(s) for s in reference_steps],
+                    alignment_path=[],
+                    windows=[],
+                    stats={"trace_gate": "denied", "num_steps": len(reference_steps)},
+                )
+
         if not coarse_to_fine:
             return self._score_once(
                 reference_steps,
