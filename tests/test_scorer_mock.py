@@ -2,8 +2,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from reward_align_scorer.scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.scorer import WindowConfig
+from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.scorer import WindowConfig
 
 
 class MockEmbedder:

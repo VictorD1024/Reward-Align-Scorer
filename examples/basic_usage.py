@@ -1,5 +1,5 @@
-from reward_align_scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.embedding import load_embedding_backend
+from raise_scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.embedding import load_embedding_backend
 
 
 def main():

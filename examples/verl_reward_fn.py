@@ -8,7 +8,7 @@ Then configure your trainer to use that reward module, depending on your
 project's reward loading convention.
 """
 
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer.verl_adapter import compute_score
 
 
 __all__ = ["compute_score"]

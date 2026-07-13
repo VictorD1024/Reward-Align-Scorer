@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reward_align_scorer.confidence import assess_confidence, classify_steps
-from reward_align_scorer.embedding import load_embedding_backend
-from reward_align_scorer.scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.confidence import assess_confidence, classify_steps
+from raise_scorer.embedding import load_embedding_backend
+from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer
 
 
 def _load_jsonl(path: Path) -> list[dict]:

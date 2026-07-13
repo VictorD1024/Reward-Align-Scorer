@@ -3,9 +3,9 @@ import time
 
 import torch
 
-from reward_align_scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.embedding import load_embedding_backend
-from reward_align_scorer.scorer import monotonic_align, sliding_windows
+from raise_scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.embedding import load_embedding_backend
+from raise_scorer.scorer import monotonic_align, sliding_windows
 
 
 def _bench(fn, iters: int, warm: int = 3) -> float:

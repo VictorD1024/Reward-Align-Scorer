@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from reward_align_scorer.verl_adapter import parse_reference_steps
+from raise_scorer.verl_adapter import parse_reference_steps
 
 
 def test_canonical_key():

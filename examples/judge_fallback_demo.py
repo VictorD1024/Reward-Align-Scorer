@@ -1,4 +1,4 @@
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer.verl_adapter import compute_score
 
 
 def main():

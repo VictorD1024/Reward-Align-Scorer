@@ -13,12 +13,21 @@ from .scorer import ScorerConfig, SemanticRewardScorer
 _SCORER: Optional[SemanticRewardScorer] = None
 
 
+def _env(name: str, default: str = "", legacy: str | None = None) -> str:
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    if legacy:
+        return os.environ.get(legacy, default)
+    return default
+
+
 def _get_scorer() -> Optional[SemanticRewardScorer]:
     global _SCORER
     if _SCORER is not None:
         return _SCORER
 
-    model_path = os.environ.get("REWARD_ALIGN_MODEL_PATH", "")
+    model_path = _env("RAISE_MODEL_PATH", legacy="REWARD_ALIGN_MODEL_PATH")
     if not model_path:
         return None
     backend = load_embedding_backend(model_path)
@@ -27,11 +36,11 @@ def _get_scorer() -> Optional[SemanticRewardScorer]:
     _SCORER = SemanticRewardScorer(
         backend,
         ScorerConfig(
-            threshold=float(os.environ.get("REWARD_ALIGN_THRESHOLD", "0.65")),
-            max_score=float(os.environ.get("REWARD_ALIGN_MAX_SCORE", "1.0")),
-            max_length=int(os.environ.get("REWARD_ALIGN_MAX_LENGTH", "128")),
-            encode_batch_size=int(os.environ.get("REWARD_ALIGN_BATCH_SIZE", "128")),
-            require_trace=os.environ.get("REWARD_ALIGN_REQUIRE_TRACE", "0") == "1",
+            threshold=float(_env("RAISE_THRESHOLD", "0.65", legacy="REWARD_ALIGN_THRESHOLD")),
+            max_score=float(_env("RAISE_MAX_SCORE", "1.0", legacy="REWARD_ALIGN_MAX_SCORE")),
+            max_length=int(_env("RAISE_MAX_LENGTH", "128", legacy="REWARD_ALIGN_MAX_LENGTH")),
+            encode_batch_size=int(_env("RAISE_BATCH_SIZE", "128", legacy="REWARD_ALIGN_BATCH_SIZE")),
+            require_trace=_env("RAISE_REQUIRE_TRACE", "0", legacy="REWARD_ALIGN_REQUIRE_TRACE") == "1",
         ),
     )
     return _SCORER

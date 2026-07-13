@@ -5,7 +5,7 @@
   <a href="./design.zh-CN.md">中文</a>
 </p>
 
-Reward Align Scorer is built around one engineering choice:
+RAISE (Reward-Aligned Agent Trajectory Scorer) is built around one engineering choice:
 
 > Convert structured reward judgment into batched semantic alignment before calling a slow Judge.
 
@@ -73,7 +73,7 @@ The DP, threshold gate, and `order_rate` are unchanged — they operate on the p
 
 ## Recitation Defense (P0, optional)
 
-A model can game pure semantic alignment by *reciting* the reference steps with filler ("first I will locate root cause, next I carefully apply the fix…") — no real execution, but every step name lands in a high-similarity window. The optional trace gate, enabled via `ScorerConfig(require_trace=True)` or the `REWARD_ALIGN_REQUIRE_TRACE=1` env var in the veRL adapter, scores such responses 0.
+A model can game pure semantic alignment by *reciting* the reference steps with filler ("first I will locate root cause, next I carefully apply the fix…") — no real execution, but every step name lands in a high-similarity window. The optional trace gate, enabled via `ScorerConfig(require_trace=True)` or the `RAISE_REQUIRE_TRACE=1` env var in the veRL adapter, scores such responses 0.
 
 ### Design: response-level gate
 
@@ -110,7 +110,7 @@ Semantic alignment does **not** verify internal actions — it checks whether th
 | **reasoning** | Analytical content should appear | `explain why the overflow occurs`, `locate the root cause` | Medium — needs causal / diagnostic prose |
 | **proxy** | Internal preparation; only matches via topic overlap | `read the linked issue`, `understand the bug report` | Low — matches bug-description paragraphs, not the act of reading |
 
-Use `classify_step()` / `classify_steps()` from `reward_align_scorer.confidence` to audit a reference checklist before training.
+Use `classify_step()` / `classify_steps()` from `raise_scorer.confidence` to audit a reference checklist before training.
 
 ### Rules of thumb
 

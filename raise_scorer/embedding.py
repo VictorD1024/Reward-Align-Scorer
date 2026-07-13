@@ -44,7 +44,7 @@ def get_reward_device() -> torch.device:
 
 
 def default_dtype(device: torch.device) -> torch.dtype:
-    if device.type in {"cuda", "npu"} and os.environ.get("REWARD_ALIGN_FP32", "0") != "1":
+    if device.type in {"cuda", "npu"} and (os.environ.get("RAISE_FP32") or os.environ.get("REWARD_ALIGN_FP32", "0")) != "1":
         return torch.float16
     return torch.float32
 

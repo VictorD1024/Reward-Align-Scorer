@@ -5,7 +5,7 @@
   <a href="./design.zh-CN.md">中文</a>
 </p>
 
-Reward Align Scorer 的核心工程选择：
+RAISE（Reward-Aligned Agent Trajectory Scorer）的核心工程选择：
 
 > 在调用慢速 Judge 之前，把结构化 reward 判断转换为批量语义对齐。
 
@@ -73,7 +73,7 @@ DP、阈值门控和 `order_rate` 保持不变——它们操作在逐步 max �
 
 ## 复读防御（P0，可选）
 
-模型可以通过**复读** reference step 名加填充词来骗过纯语义对齐（"首先我会定位根因，接着我仔细地应用修复……"）——没有真正执行，但每个 step 名都落进一个高相似度 window。可选的 trace gate 通过 `ScorerConfig(require_trace=True)` 或 veRL adapter 的 `REWARD_ALIGN_REQUIRE_TRACE=1` 环境变量开启，会把这类响应判为 0 分。
+模型可以通过**复读** reference step 名加填充词来骗过纯语义对齐（"首先我会定位根因，接着我仔细地应用修复……"）——没有真正执行，但每个 step 名都落进一个高相似度 window。可选的 trace gate 通过 `ScorerConfig(require_trace=True)` 或 veRL adapter 的 `RAISE_REQUIRE_TRACE=1` 环境变量开启，会把这类响应判为 0 分。
 
 ### 设计：响应级 gate
 
@@ -110,7 +110,7 @@ gate 针对**懒散/填充式复读**——只复述 step 名而不真正执行�
 | **reasoning** | 分析性内容应出现 | `explain why the overflow occurs`、`locate the root cause` | 中 — 需因果/诊断性表述 |
 | **proxy** | 内部准备动作；仅靠主题重叠匹配 | `read the linked issue`、`understand the bug report` | 低 — 匹配 bug 描述段落，非「真的读了」 |
 
-训练前可用 `reward_align_scorer.confidence` 的 `classify_step()` / `classify_steps()` 审计 checklist。
+训练前可用 `raise_scorer.confidence` 的 `classify_step()` / `classify_steps()` 审计 checklist。
 
 ### 经验法则
 

@@ -17,9 +17,9 @@ import argparse
 import json
 import sys
 
-from reward_align_scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.embedding import load_embedding_backend
-from reward_align_scorer.scorer import _normalize_steps, _step_repr
+from raise_scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.embedding import load_embedding_backend
+from raise_scorer.scorer import _normalize_steps, _step_repr
 
 
 def _load_samples(path: str):

@@ -1,4 +1,6 @@
-# ⚡ Reward Align Scorer
+# ⚡ RAISE
+
+> **Reward-Aligned Agent Trajectory Scorer**
 
 <p align="right">
   <a href="./README.md">English</a> |
@@ -28,7 +30,7 @@ flowchart TD
 
 **密集白盒 reward。** 不再只在最终答案上给一个黑盒分数，而是每个 reference step 都报出 matched/unmatched 及其对应的 response window，外加 `match_rate`、`order_rate` 和完整 alignment path —— 可以直接看出模型是漏步骤、顺序错、还是重复灌水。
 
-| | LLM-as-Judge | 规则 / 字符串匹配 | 最终答案稀疏 reward | **Reward Align Scorer** |
+| | LLM-as-Judge | 规则 / 字符串匹配 | 最终答案稀疏 reward | **RAISE** |
 | --- | --- | --- | --- | --- |
 | 粒度 | 每样本一个判定 | 二元命中 | 末尾一个分数 | 步骤级密集 |
 | 语义 | 强 | 改写即失效 | 无 | embedding 相似度 |
@@ -42,7 +44,7 @@ flowchart TD
 
 ## ⚡ 为什么这么快
 
-瓶颈不是算力，而是**每条样本一次自回归 LLM-Judge 调用**，在整个 rollout batch 上串行。Reward Align Scorer 把它换成一条批量张量流水线：
+瓶颈不是算力，而是**每条样本一次自回归 LLM-Judge 调用**，在整个 rollout batch 上串行。RAISE 把它换成一条批量张量流水线：
 
 | 阶段 | 替代了什么 | 加速机制 |
 | --- | --- | --- |
@@ -122,7 +124,7 @@ search -> open source -> extract evidence -> answer with citation
 - 支持 `max_response_length=4096/8192` 等长响应训练场景。
 - 支持 GPU / Ascend NPU / CPU 设备选择。
 - veRL-compatible `compute_score` 入口，可放入 `verl/utils/reward_score`。
-- **复读欺诈防御（可选 trace gate）** —— 开启 `ScorerConfig(require_trace=True)`（或在 veRL adapter 中设 `REWARD_ALIGN_REQUIRE_TRACE=1`），对全文既无工具/执行痕迹（工具标签、git diff 标记、代码、文件路径、测试结论）也无推理/分析痕迹（因果连接词、动词锚定的 `root cause is` 类短语）的响应直接判 0 分。杀死懒散/填充式复读，且在真实 PR-fix 数据上对 genuine 零召回损失（详见 [docs/design.zh-CN.md](docs/design.zh-CN.md#复读防御p0可选)）。
+- **复读欺诈防御（可选 trace gate）** —— 开启 `ScorerConfig(require_trace=True)`（或在 veRL adapter 中设 `RAISE_REQUIRE_TRACE=1`），对全文既无工具/执行痕迹（工具标签、git diff 标记、代码、文件路径、测试结论）也无推理/分析痕迹（因果连接词、动词锚定的 `root cause is` 类短语）的响应直接判 0 分。杀死懒散/填充式复读，且在真实 PR-fix 数据上对 genuine 零召回损失（详见 [docs/design.zh-CN.md](docs/design.zh-CN.md#复读防御p0可选)）。
 - **复读欺诈审计工具** —— `benchmarks/dump_scores.py --require-trace` 输出 `denied` 列与 `[recall watch]` 行，量化 gate 误杀了多少真实步骤，便于在真实 rollout 数据上标定 pattern。
 - **置信度路由 + Judge fallback** —— `assess_confidence()` 与 `compute_score(..., return_details=True)` 内置 `fallback_recommended`，将模糊样本路由到 LLM-as-Judge；见 [Step 设计指南](docs/design.zh-CN.md#reference-step-设计指南)。
 - **Reward 质量 benchmark** —— `benchmarks/reward_quality.py` 统计 genuine vs recitation 的 score/confidence/fallback 率。
@@ -143,8 +145,8 @@ pytest
 ## 🚀 快速开始
 
 ```python
-from reward_align_scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.embedding import load_embedding_backend
+from raise_scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.embedding import load_embedding_backend
 
 backend = load_embedding_backend("/path/to/bge-small-zh-v1.5")
 scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.65))
@@ -205,7 +207,7 @@ flowchart LR
 ```
 
 ```python
-from reward_align_scorer.trajectories import score_trajectories
+from raise_scorer.trajectories import score_trajectories
 
 result = score_trajectories(
     scorer,
@@ -229,8 +231,8 @@ print(result.result.matched_steps)
 语义 reward 快，但不是所有样本都该盲信。使用内置路由器：
 
 ```python
-from reward_align_scorer import assess_confidence, classify_steps
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer import assess_confidence, classify_steps
+from raise_scorer.verl_adapter import compute_score
 
 print(classify_steps([
     "summarize the reported bug symptoms",  # reasoning — 较好
@@ -251,17 +253,17 @@ else:
 
 ## 🔌 veRL 集成
 
-可以直接导入 `reward_align_scorer.verl_adapter.compute_score` 作为 reward function：
+可以直接导入 `raise_scorer.verl_adapter.compute_score` 作为 reward function：
 
 ```python
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer.verl_adapter import compute_score
 ```
 
 设置 embedding 模型路径：
 
 ```bash
-export REWARD_ALIGN_MODEL_PATH=/path/to/your_embedding_model
-export REWARD_ALIGN_THRESHOLD=0.65
+export RAISE_MODEL_PATH=/path/to/your_embedding_model
+export RAISE_THRESHOLD=0.65
 ```
 
 示例输入：
@@ -301,7 +303,7 @@ integrations/verl/utils/reward_score/semantic_align.py
 这个项目更像 **Reward Pre-Scorer / Reward Router**，不是万能 Judge。推荐生产用法：
 
 ```text
-high confidence structured sample -> Reward Align Scorer
+high confidence structured sample -> RAISE
 low confidence / ambiguous sample -> LLM Judge fallback
 symbolic correctness task          -> verifier / unit tests
 ```

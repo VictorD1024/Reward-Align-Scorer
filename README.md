@@ -1,11 +1,13 @@
-# ⚡ Reward Align Scorer
+# ⚡ RAISE
+
+> **Reward-Aligned Agent Trajectory Scorer**
 
 <p align="right">
   <a href="./README.md">English</a> |
   <a href="./README.zh-CN.md">中文</a>
 </p>
 
-**Dense, white-box semantic reward scoring for long-response RL training.** Reward Align Scorer turns slow, per-sample LLM-Judge step evaluation into a batched embedding-similarity + monotonic-alignment problem, and returns a step-level interpretable signal instead of one black-box score at the final answer.
+**Dense, white-box semantic reward scoring for long-response RL training.** RAISE turns slow, per-sample LLM-Judge step evaluation into a batched embedding-similarity + monotonic-alignment problem, and returns a step-level interpretable signal instead of one black-box score at the final answer.
 
 ```mermaid
 flowchart TD
@@ -28,7 +30,7 @@ Similarity matrix is computed as a **single batched GEMM** on GPU/NPU; the **mon
 
 **Dense, white-box reward.** Instead of one black-box score at the final answer, every reference step is reported as matched or unmatched with its aligned response window, plus `match_rate`, `order_rate`, and the full alignment path — so you can tell whether the model missed a step, did the right steps in the wrong order, or padded the response with repetition.
 
-| | LLM-as-Judge | Rule / string matching | Final-answer sparse reward | **Reward Align Scorer** |
+| | LLM-as-Judge | Rule / string matching | Final-answer sparse reward | **RAISE** |
 | --- | --- | --- | --- | --- |
 | Granularity | per-sample verdict | binary match | one score at the end | step-level dense |
 | Semantics | strong | brittle to paraphrases | none | embedding similarity |
@@ -42,7 +44,7 @@ Built for RLHF, RLAIF, GRPO, and agent post-training where responses are long an
 
 ## ⚡ Why It's Fast
 
-The bottleneck is not raw FLOPs — it's one autoregressive LLM-Judge call per sample, serialized across the rollout batch. Reward Align Scorer replaces that with a batched tensor pipeline:
+The bottleneck is not raw FLOPs — it's one autoregressive LLM-Judge call per sample, serialized across the rollout batch. RAISE replaces that with a batched tensor pipeline:
 
 | Stage | Replaces | Speedup mechanism |
 | --- | --- | --- |
@@ -72,7 +74,7 @@ In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`,
 - GPU / Ascend NPU / CPU device selection.
 - veRL-compatible `compute_score` entrypoint.
 - Interpretable output: matched/unmatched steps, alignment path, match/order rates.
-- **Recitation-hacking defense (optional trace gate)** — enable `ScorerConfig(require_trace=True)` (or `REWARD_ALIGN_REQUIRE_TRACE=1` in the veRL adapter) to score responses 0 when they contain neither tool/execution evidence (tool tags, git diff markers, code, file paths, test verdicts) nor reasoning/analytical evidence (causal connectors, verb-anchored `root cause is`-style phrases) anywhere. Kills lazy/padded recitation with zero recall loss on genuine PR-fix data (see [docs/design.md](docs/design.md#recitation-defense-p0-optional)).
+- **Recitation-hacking defense (optional trace gate)** — enable `ScorerConfig(require_trace=True)` (or `RAISE_REQUIRE_TRACE=1` in the veRL adapter) to score responses 0 when they contain neither tool/execution evidence (tool tags, git diff markers, code, file paths, test verdicts) nor reasoning/analytical evidence (causal connectors, verb-anchored `root cause is`-style phrases) anywhere. Kills lazy/padded recitation with zero recall loss on genuine PR-fix data (see [docs/design.md](docs/design.md#recitation-defense-p0-optional)).
 - **Recitation-hacking audit tool** — `benchmarks/dump_scores.py --require-trace` reports a `denied` column and `[recall watch]` line quantifying how many genuine steps the gate falsely denies, so patterns can be calibrated on real rollout data.
 - **Confidence routing + Judge fallback** — `assess_confidence()` and built-in `fallback_recommended` in `compute_score(..., return_details=True)` route ambiguous samples to LLM-as-Judge; see [Step Design Guidelines](docs/design.md#reference-step-design-guidelines).
 - **Reward quality benchmark** — `benchmarks/reward_quality.py` reports score/confidence/fallback rates on genuine vs recitation samples.
@@ -93,8 +95,8 @@ pytest
 ## 🚀 Quick Start
 
 ```python
-from reward_align_scorer import ScorerConfig, SemanticRewardScorer
-from reward_align_scorer.embedding import load_embedding_backend
+from raise_scorer import ScorerConfig, SemanticRewardScorer
+from raise_scorer.embedding import load_embedding_backend
 
 backend = load_embedding_backend("/path/to/your_embedding_model")
 scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.65))
@@ -155,7 +157,7 @@ flowchart LR
 ```
 
 ```python
-from reward_align_scorer.trajectories import score_trajectories
+from raise_scorer.trajectories import score_trajectories
 
 result = score_trajectories(
     scorer,
@@ -179,8 +181,8 @@ Cost: response windows encoded once and reused across trajectories via the LRU c
 Semantic reward is fast but not always trustworthy. Use the built-in router:
 
 ```python
-from reward_align_scorer import assess_confidence, classify_steps
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer import assess_confidence, classify_steps
+from raise_scorer.verl_adapter import compute_score
 
 # Audit step design before training
 print(classify_steps([
@@ -202,17 +204,17 @@ See [Reference Step Design Guidelines](docs/design.md#reference-step-design-guid
 
 ## 🔌 veRL Integration
 
-Copy or import `reward_align_scorer.verl_adapter.compute_score` as a reward function:
+Copy or import `raise_scorer.verl_adapter.compute_score` as a reward function:
 
 ```python
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer.verl_adapter import compute_score
 ```
 
 Set the embedding model path:
 
 ```bash
-export REWARD_ALIGN_MODEL_PATH=/path/to/bge-small-zh-v1.5
-export REWARD_ALIGN_THRESHOLD=0.65
+export RAISE_MODEL_PATH=/path/to/bge-small-zh-v1.5
+export RAISE_THRESHOLD=0.65
 ```
 
 Example input:

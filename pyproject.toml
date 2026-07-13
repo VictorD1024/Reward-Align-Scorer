@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reward-align-scorer"
+name = "raise-scorer"
 version = "0.1.0"
-description = "Fast, interpretable semantic reward scoring for long-response RL training."
+description = "RAISE — Reward-Aligned Agent Trajectory Scorer for fast, interpretable semantic reward in long-response RL training."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -39,10 +39,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/VictorD1024/Reward-Align-Scorer"
-Repository = "https://github.com/VictorD1024/Reward-Align-Scorer"
-Issues = "https://github.com/VictorD1024/Reward-Align-Scorer/issues"
-Changelog = "https://github.com/VictorD1024/Reward-Align-Scorer/releases"
+Homepage = "https://github.com/VictorD1024/RAISE"
+Repository = "https://github.com/VictorD1024/RAISE"
+Issues = "https://github.com/VictorD1024/RAISE/issues"
+Changelog = "https://github.com/VictorD1024/RAISE/releases"
 
 [project.optional-dependencies]
 dev = [
@@ -55,7 +55,7 @@ sentence-transformers = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["reward_align_scorer*"]
+include = ["raise_scorer*"]
 
 [tool.ruff]
 line-length = 120

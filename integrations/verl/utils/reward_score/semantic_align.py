@@ -6,13 +6,13 @@ Copy this file into a veRL checkout at:
 
 Install this package in the same Python environment:
 
-    pip install -e /path/to/reward-align-scorer
+    pip install -e /path/to/RAISE
 
 Then point your reward configuration at the `semantic_align` reward module
 according to your veRL project's reward loading convention.
 """
 
-from reward_align_scorer.verl_adapter import compute_score
+from raise_scorer.verl_adapter import compute_score
 
 
 __all__ = ["compute_score"]

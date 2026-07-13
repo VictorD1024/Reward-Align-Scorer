@@ -1,4 +1,4 @@
-from reward_align_scorer.scorer import sliding_windows
+from raise_scorer.scorer import sliding_windows
 
 
 def test_sliding_windows_overlaps():

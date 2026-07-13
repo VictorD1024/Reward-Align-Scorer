@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from reward_align_scorer.scorer import monotonic_align
+from raise_scorer.scorer import monotonic_align
 
 
 def test_monotonic_align_finds_ordered_path():

@@ -1,4 +1,4 @@
-from reward_align_scorer.trace_detector import TraceDetector
+from raise_scorer.trace_detector import TraceDetector
 
 
 def test_tool_trace_passes():

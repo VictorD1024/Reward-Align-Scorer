@@ -1,11 +1,11 @@
-from reward_align_scorer.confidence import (
+from raise_scorer.confidence import (
     assess_confidence,
     classify_step,
     classify_steps,
     should_fallback_to_judge,
     RoutingConfig,
 )
-from reward_align_scorer.scorer import RewardScore
+from raise_scorer.scorer import RewardScore
 
 
 def _result(**kwargs):
