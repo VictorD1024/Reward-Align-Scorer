@@ -13,12 +13,135 @@ RAISE（Reward-Aligned Agent Trajectory Scorer）的核心工程选择：
 
 ## 流水线
 
-1. 从 `reference_steps`（主键）或 `actions`（Agentic-RL 别名）解析参考结构——checklist 项、轨迹节点、子任务。
+1. 从 veRL/RLVR 输入中定位 reference 结构，并标准化 checklist 项、轨迹节点或
+   子任务。
 2. 将长响应切分成重叠的、边界感知的滑动窗口。
 3. 将 reference items 和 response windows 编码为归一化 embedding（批量编码，LRU 缓存）。
 4. 在 GPU / Ascend NPU 上以单次 GEMM 计算稠密相似度矩阵。
 5. 在 CPU（numpy）上运行带阈值的单调对齐 DP。
 6. 返回 `score = match_rate × order_rate × max_score` 以及可解释的对齐细节。
+
+### RLVR 字段解析
+
+标准 veRL RewardManager 会从 Parquet 行中提取
+`row["reward_model"]["ground_truth"]` 和 `row.get("extra_info", {})`，再调用
+`compute_score`。RAISE 按以下顺序解析步骤：
+
+1. `extra_info.reference_steps`；
+2. `extra_info.actions`；
+3. 自定义或内置嵌套路径，例如 `metadata.reference_steps`、
+   `rlvr.reference_steps`；
+4. 结构化的 `ground_truth.reference_steps`、`ground_truth.actions`，或者
+   ground-truth list。
+
+Arrow/Pandas list-like、Python 原生容器和 JSON 序列化 array/object 都会被
+标准化。普通标量 ground-truth 字符串会被排除，防止把最终答案监督误认为过程
+监督。`ReferenceStepsResolution.source` 以及 veRL details 中的
+`reference_steps_source` 会报告实际采用的 schema 路径，便于审计。
+
+## Embedding 契约
+
+loader 接受本地模型目录或 Hugging Face 模型 ID，并把 embedding 契约与模型
+绑定：pooling（`cls` 或基于 attention mask 的 `mean`）、query instruction、
+passage instruction，以及可选 revision。reference-step candidates 按 query
+编码，response windows 按 passage 编码。角色也是 LRU key 的一部分，避免
+非对称模型在两个塔之间错误复用相同原始文本。
+
+已知模型 preset 会落实模型卡的要求，同时保留显式覆盖能力。例如，多语 E5
+系列使用 mean pooling 和 `query: `/`passage: ` 前缀。显式参数始终优先于
+preset，包括显式空 instruction。相似度 threshold 仍属于 scorer 配置，因为
+它取决于模型、语言分布、窗口尺寸与实际 rollout 分布，不能由模型 ID 单独决定。
+
+## Workflow GroundTruth v1
+
+线性 reference steps 继续作为最小 API；长程任务可以改用经过校验的
+`WorkflowGroundTruth`，表示 DAG 或有界循环状态机。
+
+每个节点包含：
+
+- 必选/可选角色、stage、权重与访问次数上限；
+- 支持多个合法替代项的 `action` 契约；
+- 可选的 `evidence` 和 `outcome` 契约；
+- 可选的环境状态前置条件与后置条件。
+
+边可标记为 `forward`、`alternative`、`retry`、`recovery` 或 `rollback`，
+并具有有限遍历次数。结构校验会拒绝未知节点、不可达节点以及无法到达终点的
+节点；运行时还同时限制路径长度、有限状态数和总状态展开次数。
+
+默认图 scorer 构造有限自动机，状态为
+`(当前节点, 节点访问计数, 边遍历计数)`。每条转移都会增加访问计数，因此即使
+原工作流包含 retry 或 rollback，有限展开后的状态图仍是 DAG。动态规划直接在
+“有界工作流状态 × 有序响应窗口”的乘积空间中搜索，只对选中的合法路径执行
+完整 Action/Evidence/Outcome、阶段与状态评分，从而避免 embedding 并评分每条
+完整终局路径。
+
+`alignment_mode="enumerate"` 保留原有有界终止路径枚举器，作为受控消融。
+两种模式都会输出截断诊断；图模式额外报告展开状态数、转移数、终局状态数和
+action 覆盖估计。必选和可选契约仍分开评分，可选节点缺失不会降低必选覆盖率；
+重复契约继续使用 occurrence-specific 单调匹配计算顺序。
+
+节点 reward 是 Action、Evidence、Outcome 加权完成度的归一化结果；必选节点
+先聚合为阶段 reward，再按显式 `stage_weights` 聚合。未配置阶段权重时使用
+阶段内必选节点权重。因此输出同时提供局部信用和分层进度。
+
+环境状态验证与文本语义相似度保持分离。前后状态默认按递归子集匹配，也可由
+调用方提供 validator。状态结果可以只报告、与语义过程 reward 混合，或作为
+hard gate。RAISE 不会从 response 文本中臆造环境真值。
+
+### Turn-level 势函数塑形
+
+`WorkflowPotentialScorer` 把 Agent turn 保留为显式 passage，并在每个 turn 后
+计算前缀势函数。默认
+`Phi_t = required_workflow_coverage(prefix_t)`，密集信号为：
+
+```text
+r_t = scale * (gamma * Phi_t - Phi_(t-1))
+```
+
+当 `gamma=1` 时，所有增量会望远镜求和到最终势值。训练器可以用
+`assign_turn_rewards` 把每个增量放到对应 Agent turn 的最后一个生成 token。
+环境 outcome reward 始终单独记录，只在实验层与 process reward 混合。
+
+### TraceEvent 信任边界
+
+`WorkflowScorer.score_events()` 接受 runtime adapter 产生的有序
+`TraceEvent`。进入语义 scorer 的是事件流，而不是模型自述。工具输入/输出采用
+确定性序列化，并按字段截断，以限制 encoder 与日志成本。
+
+可信性由两个条件共同决定：事件必须显式设置 `trusted=True`，并且 source
+属于配置的可信来源（默认 `runtime` 或 `external`）。因此模型生成的 payload
+即使写入 `trusted=true` 也不能自行升级为可信证据。序列化 mapping 默认忽略
+其中的 trusted 位；只有通过已认证 runtime 边界后才能显式允许序列化 trust。
+
+校验器会重建节点 occurrence、合法边、节点访问次数和边遍历次数，同时检查
+event ID 唯一性、workflow 起点、终点以及 occurrence 连续性。非法轨迹默认
+hard gate；软惩罚和允许未到终点的局部轨迹都必须显式配置。路径截断、
+事件路径与语义路径不一致、事件校验失败都会通过 veRL adapter 路由到 Judge
+fallback。
+
+对每次节点访问，首个非空 `state_before` 与最后一个非空 `state_after` 会自动
+转成状态观测，使三类信号彼此分离且可审计：
+
+```text
+语义契约覆盖
+运行时转移合法性
+环境状态有效性
+```
+
+### Runtime adapter 边界
+
+`ToolCallRecord` 是框架无关的运行时输入契约。`RuntimeEventAdapter` 先匹配
+精确注册的自定义 handler，再依次识别 pytest、shell、文件、浏览器、HTTP 与
+通用工具。生成的 Action/Evidence/Outcome 是稳定的 scorer 输入；原始工具
+输入/输出仍附着在事件上，供审计和确定性渲染使用。
+
+trust 是 adapter 实例的能力，不是 record 可提交的属性，因此模型控制的工具
+payload 无法自我升级。默认生成不可信事件；rollout worker 只有在确认记录来源
+后，才能创建 `RuntimeEventAdapter(trusted_runtime=True)`。原始 payload 进入
+`TraceEvent` 前默认执行递归敏感 key 脱敏。
+
+veRL 对 `extra_info["tool_calls"]` 使用相同边界。显式 `trace_events` 优先；
+否则工具记录只转换一次，然后进入既有 trace 校验与评分流程。
 
 ## 为什么用滑动窗口
 
@@ -28,7 +151,19 @@ RAISE（Reward-Aligned Agent Trajectory Scorer）的核心工程选择：
 - 按真实标点切割（`。；，\n<space>`），而非硬性字符计数，语义单元保持完整；
 - 采用粗→细两段式方案并支持提前退出：粗扫（大窗口、宽松阈值）低成本捕获全覆盖样本；仅当粗扫不完整时才跑细扫。
 
-加窗是整个流水线可批处理的前提：它将变长响应转化为一组有界的定长块，使得单次批量编码和单次 GEMM 成为可能。
+当前窗口大小按字符数配置。候选窗口会先覆盖完整响应；候选数超过
+`max_windows` 时，RAISE 在完整序列上等距取样并保留首尾窗口，而不是只保留
+响应前缀。`_score_once` 会输出 `candidate_windows`、
+`windows_downsampled`、`covered_chars`、`coverage_rate` 和
+`tail_covered`，方便根据真实 rollout 数据标定窗口预算。
+
+加窗是整个流水线可批处理的前提：它将变长响应转化为有界的定长块，使共享批量编码和逐样本稠密 GEMM 成为可能。
+
+`SemanticRewardScorer.score_batch()` 把这种批处理扩展到多个样本：每次粗扫或
+细扫会拼接所有活跃样本的 step candidates 与 windows，统一调用一次
+embedder，再切回逐样本相似度矩阵。embedder 会先对本次调用中的重复文本去重，
+再查询进程内 LRU 缓存。输入超过 `encode_batch_size` 时仍会拆成 encoder
+micro-batch；GEMM 和 CPU DP 保持逐样本执行。
 
 ## 为什么用单次 GEMM
 
@@ -59,7 +194,12 @@ DP 矩阵很小（`num_steps × num_windows`，加窗后通常几千个单元格
 
 ## 为什么需要独立的 `order_rate`
 
-单调 DP 路径本身保证有序——因此"通过 DP 匹配的步骤占比"无法检测出顺序错乱的响应。`order_rate` 独立于 DP 路径计算：对每个匹配步骤取 argmax window（最可能实现该 step 的 response 位置），然后测量相邻 reference-step 对的 argmax window 按预期顺序出现的比例。这样，一个命中所有步骤但顺序错误的响应在 `match_rate` 很高时仍会得到较低的 `order_rate`。最终分数乘以两者：`score = match_rate × order_rate × max_score`。
+单调 DP 路径本身保证有序——因此“通过 DP 匹配的步骤占比”无法检测顺序错乱。
+`order_rate` 独立于 DP，使用所有“最强窗口超过 threshold”的 step，包括被
+DP 丢弃但实际已超过阈值的逆序 step。它比较所有 reference-step pair：正序记
+`1`，同一窗口记 `0.5`，逆序记 `0`。这种类似 Kendall 的信号既防止 DP 通过
+丢弃问题 step 来掩盖乱序，也避免两个简短动作落在同一窗口时遭受全有或全无
+惩罚。最终分数仍为：`score = match_rate × order_rate × max_score`。
 
 ## 为什么需要逐步候选 action
 
@@ -110,7 +250,7 @@ gate 针对**懒散/填充式复读**——只复述 step 名而不真正执行�
 | **reasoning** | 分析性内容应出现 | `explain why the overflow occurs`、`locate the root cause` | 中 — 需因果/诊断性表述 |
 | **proxy** | 内部准备动作；仅靠主题重叠匹配 | `read the linked issue`、`understand the bug report` | 低 — 匹配 bug 描述段落，非「真的读了」 |
 
-训练前可用 `raise_scorer.confidence` 的 `classify_step()` / `classify_steps()` 审计 checklist。
+训练前可用 `raise_scorer.core` 的 `classify_step()` / `classify_steps()` 审计 checklist。
 
 ### 经验法则
 
@@ -152,7 +292,11 @@ else:
     reward = details["score"]
 ```
 
-在你的 rollout 切片上_tune `RoutingConfig`。运行 `benchmarks/reward_quality.py` 查看 genuine vs recitation 的 fallback 率。
+在你的 rollout 切片上调整 `RoutingConfig`。运行
+`benchmarks/reward_quality.py` 查看带标签的排序、阈值、pairwise、路由和
+hard-negative subtype 指标。命令还会输出无序精确子串基线；该基线通常会给
+复读较高分数，从而直观看出语义对齐与顺序机制是否真正增加了区分度。仓库
+内置 demo 仅是合成回归种子；生产阈值仍需使用任务相关的真实 rollout 标注。
 
 `_score_once` stats 导出：
 
@@ -163,6 +307,12 @@ else:
 margin 低表示匹配模糊 —— 当 `RoutingConfig.min_margin > 0` 时是强 fallback 信号。真实 PR-fix 数据上 mean margin 常为 **~0.008**；默认 `min_margin=0` 不做硬门控，margin 只参与综合置信度。
 
 `require_trace_when_high_match=True`（默认）时，`match_rate ≥ 0.95` 但**无执行/推理痕迹**会触发 `high_match_without_execution_trace`。这能在不开启硬 trace 打 0 分的情况下，区分 padded recitation（高 match、无 diff/代码）与 genuine PR（高 match、有 trace）。
+
+路由器还会计算 `intention_recitation_fraction`：精确 candidate step 文本只出现
+在明确未来式/意图式句子（如 `will`、`plan to`、`将`、`计划`）中的 step
+比例。当它达到 `RoutingConfig.max_intention_recitation_fraction` 时，样本会
+fallback 到 Judge。这个窄信号专门处理“一条真实工具痕迹 + 其余步骤复读冒充”
+的部分伪造。
 
 ## 复杂度
 

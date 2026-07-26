@@ -1,4 +1,4 @@
-from raise_scorer.verl_adapter import compute_score
+from raise_scorer.integrations import compute_score
 
 
 def main():

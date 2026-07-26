@@ -1,0 +1,60 @@
+{
+  "algorithm": "GRPO",
+  "seeds": [1, 2, 3],
+  "domains": [
+    {
+      "name": "code",
+      "environment": "SWE-Gym",
+      "train_split": "SWE-Gym train",
+      "evaluation_split": "SWE-bench Verified",
+      "primary_metric": "resolved_rate",
+      "max_turns": 40
+    },
+    {
+      "name": "browser",
+      "environment": "BrowserGym",
+      "train_split": "WebArena train",
+      "evaluation_split": "WebArena Verified",
+      "primary_metric": "task_success_rate",
+      "max_turns": 30
+    },
+    {
+      "name": "tool",
+      "environment": "BFCL executable sandbox",
+      "train_split": "BFCL multi-turn train",
+      "evaluation_split": "BFCL V4 agentic",
+      "primary_metric": "overall_accuracy",
+      "max_turns": 20
+    }
+  ],
+  "ablations": [
+    {
+      "name": "outcome_only",
+      "alignment_mode": "none",
+      "turn_potential": false,
+      "outcome_weight": 1.0,
+      "process_weight": 0.0
+    },
+    {
+      "name": "linear_terminal",
+      "alignment_mode": "enumerate",
+      "turn_potential": false,
+      "outcome_weight": 0.5,
+      "process_weight": 0.5
+    },
+    {
+      "name": "graph_terminal",
+      "alignment_mode": "graph",
+      "turn_potential": false,
+      "outcome_weight": 0.5,
+      "process_weight": 0.5
+    },
+    {
+      "name": "graph_turn_potential",
+      "alignment_mode": "graph",
+      "turn_potential": true,
+      "outcome_weight": 0.5,
+      "process_weight": 0.5
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import pytest
+
 from raise_scorer.confidence import (
     assess_confidence,
     classify_step,
@@ -98,3 +100,46 @@ def test_high_match_without_trace_triggers_fallback():
     )
     assert report.fallback_recommended is True
     assert any("high_match_without_execution_trace" in r for r in report.reasons)
+
+
+def test_intention_step_recitation_triggers_fallback_even_with_one_real_trace():
+    steps = ["reproduce bug", "locate root cause", "modify code", "run tests"]
+    partial_fabrication = (
+        "I ran pytest tests/test_a.py and Output: PASSED. "
+        "I will reproduce bug, locate root cause, and modify code as requested."
+    )
+
+    report = assess_confidence(
+        _result(
+            match_rate=1.0,
+            order_rate=1.0,
+            stats={"num_steps": 4, "mean_matched_sim": 0.82, "mean_margin": 0.04},
+        ),
+        steps,
+        response=partial_fabrication,
+    )
+
+    assert report.signals["intention_recitation_fraction"] == pytest.approx(0.75)
+    assert report.fallback_recommended is True
+    assert any("intention_step_recitation" in reason for reason in report.reasons)
+
+
+def test_completed_step_mentions_do_not_trigger_intention_recitation():
+    steps = ["reproduce bug", "modify code", "run tests"]
+    completed = (
+        "I did reproduce bug with pytest. I then modify code in src/module.py "
+        "and run tests; Output: PASSED."
+    )
+
+    report = assess_confidence(
+        _result(
+            match_rate=1.0,
+            order_rate=1.0,
+            stats={"num_steps": 3, "mean_matched_sim": 0.82, "mean_margin": 0.04},
+        ),
+        steps,
+        response=completed,
+    )
+
+    assert report.signals["intention_recitation_fraction"] == 0.0
+    assert not any("intention_step_recitation" in reason for reason in report.reasons)

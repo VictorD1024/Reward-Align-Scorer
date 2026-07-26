@@ -8,11 +8,14 @@ Install this package in the same Python environment:
 
     pip install -e /path/to/RAISE
 
-Then point your reward configuration at the `semantic_align` reward module
-according to your veRL project's reward loading convention.
+Then point veRL's custom reward configuration at this file and select
+``compute_score``. The adapter accepts veRL's named ``data_source``,
+``solution_str``, ``ground_truth``, and ``extra_info`` arguments. Structured
+reference steps may live in either ``reward_model.ground_truth`` or
+``extra_info`` in the source Parquet row.
 """
 
-from raise_scorer.verl_adapter import compute_score
+from raise_scorer.integrations import compute_score
 
 
 __all__ = ["compute_score"]

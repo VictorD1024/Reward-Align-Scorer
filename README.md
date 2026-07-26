@@ -1,264 +1,633 @@
-# ⚡ RAISE
+# RAISE
 
-> **Reward-Aligned Agent Trajectory Scorer**
+> **Reward-Aligned Interpretable Scoring Engine**
+>
+> Dense credit assignment for long-horizon agent trajectories.
 
 <p align="right">
   <a href="./README.md">English</a> |
   <a href="./README.zh-CN.md">中文</a>
 </p>
 
-**Dense, white-box semantic reward scoring for long-response RL training.** RAISE turns slow, per-sample LLM-Judge step evaluation into a batched embedding-similarity + monotonic-alignment problem, and returns a step-level interpretable signal instead of one black-box score at the final answer.
+RAISE is a fast, interpretable reward pre-scorer for long-horizon Agentic RL.
+It compares an actual response or trusted tool trace with structured
+GroundTruth, then returns dense step-level credit instead of a single opaque
+final-answer score.
+
+It is designed for RLHF, RLAIF, GRPO, veRL, coding agents, browser agents, and
+other workflows where reward must be computed online.
+
+```mermaid
+flowchart LR
+    GT["GroundTruth<br/>steps or workflow"] --> Score
+    Text["Model response"] --> Window["Tail-preserving<br/>sliding windows"]
+    Calls["Runtime tool calls"] --> Adapter["Trusted adapter"]
+    Adapter --> Validate["Trace + state<br/>validation"]
+    Validate --> Score
+    Window --> Score["Batched embeddings<br/>+ graph-constrained alignment"]
+    Score --> Credit["Step / stage / turn reward"]
+    Credit --> Route{"High confidence?"}
+    Route -->|yes| Reward["RL reward"]
+    Route -->|no| Judge["Judge / verifier"]
+```
+
+## 💡 Why RAISE
+
+| Capability | LLM-as-Judge | String rules | RAISE |
+| --- | --- | --- | --- |
+| Step-level credit | Prompt-dependent | Binary | Matched/unmatched steps and stages |
+| Paraphrase handling | Strong | Brittle | Embedding similarity |
+| Order awareness | Prompt-dependent | Usually absent | Monotonic alignment + pairwise order |
+| Long response support | Expensive | Fast | Bounded, tail-preserving windows |
+| Runtime evidence | Prompt text | Custom rules | Trusted events + graph/state validation |
+| Batching | Autoregressive | N/A | Cross-sample embedding batches |
+| Ambiguous cases | Native | Weak | Confidence routing to Judge |
+
+RAISE is not a universal Judge. It works best when expected behavior can be
+represented as steps, a checklist, a DAG/state machine, or verifiable runtime
+events.
+
+## ⚡ Acceleration pipeline
+
+The scoring hot path keeps dense tensor work on the accelerator and moves the
+small dynamic-programming recurrence to CPU/NumPy:
 
 ```mermaid
 flowchart TD
-    R["Ground Truth Steps"] --> E
+    R["GroundTruth Steps"] --> E
     W["Long Response<br/>→ Sliding Windows"] --> E
     subgraph GPU["GPU / Ascend NPU"]
         E["Embedding + LRU cache"] --> S["Similarity matrix"]
     end
     S --> D
-    subgraph CPU["CPU · numpy"]
-        D["Monotonic DP"]
+    subgraph CPU["CPU · NumPy"]
+        D["Linear / graph-constrained DP"]
     end
     D --> O["match_rate × order_rate"]
     O --> Score["Interpretable reward"]
 ```
 
-Similarity matrix is computed as a **single batched GEMM** on GPU/NPU; the **monotonic DP runs on CPU (numpy)** to avoid per-cell host↔device sync — ~50× faster than running the DP loop on GPU. Sliding windows use a coarse→fine two-pass scheme with early-exit, and an LRU cache reuses embeddings across rollout workers.
+`score_batch()` combines steps and response windows from active rollout
+samples into shared encoder calls. Coarse-to-fine matching lets fully covered
+samples skip the fine pass, while the LRU cache avoids re-encoding recurring
+GroundTruth steps. The DP matrix is small, so executing it on CPU avoids the
+per-cell host/device synchronization caused by a Python GPU loop.
 
-## ✨ Advantages
+## ✨ Features
 
-**Dense, white-box reward.** Instead of one black-box score at the final answer, every reference step is reported as matched or unmatched with its aligned response window, plus `match_rate`, `order_rate`, and the full alignment path — so you can tell whether the model missed a step, did the right steps in the wrong order, or padded the response with repetition.
+- Linear reference-step scoring with semantic coverage and order reward.
+- Candidate actions per step and best-of-many trajectory scoring.
+- Cross-sample `score_batch()` with coarse-to-fine windows and LRU caching.
+- Workflow GroundTruth with required/optional nodes and alternative,
+  retry, recovery, and rollback edges.
+- Graph-constrained alignment over bounded workflow states × response windows.
+- Turn-level potential rewards, `r_t = gamma * Phi_t - Phi_(t-1)`, with
+  turn-end token placement.
+- Action/Evidence/Outcome contracts, stage rewards, and environment-state
+  checks.
+- Trusted `TraceEvent` validation with bounded visits and transitions.
+- Tool-call adapters for shell/pytest, files, browser, HTTP, and custom tools.
+- Optional anti-recitation trace gate.
+- Confidence routing and Judge fallback signals.
+- Hugging Face model IDs, local models, configurable pooling, asymmetric
+  query/passage instructions, and multilingual E5 presets.
+- veRL-compatible `compute_score`.
 
-| | LLM-as-Judge | Rule / string matching | Final-answer sparse reward | **RAISE** |
-| --- | --- | --- | --- | --- |
-| Granularity | per-sample verdict | binary match | one score at the end | step-level dense |
-| Semantics | strong | brittle to paraphrases | none | embedding similarity |
-| Order awareness | via prompt | fragile / greedy | none | monotonic DP + `order_rate` |
-| Interpretability | reasoning text | hit/miss | black-box | matched/unmatched steps + path |
-| Latency / sample | ~seconds (autoregressive) | fast | fast | ~ms (batched GEMM + CPU DP) |
-| Batching | hard (per-sample calls) | n/a | n/a | one encoder forward + one GEMM |
-| Cost | high | low | low | low (LRU cache → ~0 on repeats) |
-
-Built for RLHF, RLAIF, GRPO, and agent post-training where responses are long and reward must run online. It does not replace every Judge call — use it for high-confidence structured samples and fall back to LLM Judge for ambiguous ones.
-
-## ⚡ Why It's Fast
-
-The bottleneck is not raw FLOPs — it's one autoregressive LLM-Judge call per sample, serialized across the rollout batch. RAISE replaces that with a batched tensor pipeline:
-
-| Stage | Replaces | Speedup mechanism |
-| --- | --- | --- |
-| Sliding windows | Whole-response encoding | Turns a variable-length 4096/8192 response into a bounded set of fixed-length chunks → batched encoding and a single GEMM become possible |
-| Batched embedding + single GEMM | N×M Judge calls | One encoder forward over all steps + windows, then `sim = step_emb @ win_emb.T` — autoregressive decode replaced by dense matrix multiply (~2 orders of magnitude cheaper per sample) |
-| Monotonic DP on CPU (numpy) | GPU per-cell DP loop | The DP matrix is small (`num_steps × num_windows`); running on CPU avoids per-cell host↔device sync — measured ~50× faster than the torch per-cell loop |
-| LRU embedding cache | Re-encoding every sample | Reference steps reused across the rollout batch and across training steps; long-running workers approach zero encoding cost |
-| Coarse→fine + early-exit | Always-fine matching | Fully-matched samples skip the fine pass entirely |
-| Judge fallback routing | Scoring every sample with Judge | Only ambiguous samples hit the slow path; Judge calls drop by an order of magnitude |
-
-End-to-end, per-sample reward moves from **~seconds (Judge) to ~milliseconds (scorer)**, so a whole rollout step's reward finishes in the sub-second range — eliminating the synchronous-training pipeline bubble.
-
-> The ~50× DP figure is measured on the actual `monotonic_align` recurrence. Run `benchmarks/benchmark_latency.py --breakdown` in your own environment for end-to-end numbers.
-
-## 📊 Performance Reference
-
-In an actual RL rollout setting with a **32B-parameter model**, `batch_size=32`, `rollout.n=8`, and `mean_response_length≈4096`, one step of reward compute finished within a sub-second range.
-
-> Latency depends on the embedding model, GPU/NPU hardware, window configuration, cache hit rate, and response length. Run `benchmarks/benchmark_latency.py --breakdown` in your own training environment for calibration.
-
-## 🧩 Features
-
-- Normalized `0~1` score; apply external task weights for reward shaping.
-- Each reference step may carry **multiple candidate actions** — any one matching credits the step (for steps realizable by different tools or phrasings).
-- **Multi-trajectory scoring** — pass several valid step sequences; the best-matching one wins. Handles branching agent plans.
-- Coarse→fine sliding windows with early-exit; LRU embedding cache.
-- GPU / Ascend NPU / CPU device selection.
-- veRL-compatible `compute_score` entrypoint.
-- Interpretable output: matched/unmatched steps, alignment path, match/order rates.
-- **Recitation-hacking defense (optional trace gate)** — enable `ScorerConfig(require_trace=True)` (or `RAISE_REQUIRE_TRACE=1` in the veRL adapter) to score responses 0 when they contain neither tool/execution evidence (tool tags, git diff markers, code, file paths, test verdicts) nor reasoning/analytical evidence (causal connectors, verb-anchored `root cause is`-style phrases) anywhere. Kills lazy/padded recitation with zero recall loss on genuine PR-fix data (see [docs/design.md](docs/design.md#recitation-defense-p0-optional)).
-- **Recitation-hacking audit tool** — `benchmarks/dump_scores.py --require-trace` reports a `denied` column and `[recall watch]` line quantifying how many genuine steps the gate falsely denies, so patterns can be calibrated on real rollout data.
-- **Confidence routing + Judge fallback** — `assess_confidence()` and built-in `fallback_recommended` in `compute_score(..., return_details=True)` route ambiguous samples to LLM-as-Judge; see [Step Design Guidelines](docs/design.md#reference-step-design-guidelines).
-- **Reward quality benchmark** — `benchmarks/reward_quality.py` reports score/confidence/fallback rates on genuine vs recitation samples.
-
-## 📦 Installation
+## Installation
 
 ```bash
 pip install -e .
 ```
 
-For development:
+Development:
 
 ```bash
 pip install -e ".[dev]"
-pytest
+python -m pytest
 ```
 
-## 🚀 Quick Start
+Python 3.9+ is supported.
+
+## 🚀 Quick start
+
+Configure the embedding backend for the veRL reward worker:
+
+```bash
+export RAISE_MODEL_PATH=intfloat/multilingual-e5-small
+export RAISE_THRESHOLD=0.80
+```
+
+References belong to the standard nested RLVR Parquet field
+`reward_model.ground_truth`; they are not constructed at the reward call site.
+The `row` below represents one sample after veRL reads the Parquet dataset:
 
 ```python
-from raise_scorer import ScorerConfig, SemanticRewardScorer
-from raise_scorer.embedding import load_embedding_backend
+from raise_scorer.integrations import compute_score
 
-backend = load_embedding_backend("/path/to/your_embedding_model")
-scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.65))
-
-result = scorer.score(
-    response="I read the issue, inspected the relevant files, patched the implementation, ran tests, and summarized the fix.",
-    reference_steps=[
-        "read the issue",
-        "inspect relevant files",
-        "modify the implementation",
-        "run tests",
-        "summarize the fix",
+row = {
+    "data_source": "repo-repair",
+    "prompt": [
+        {
+            "role": "user",
+            "content": "Fix the parser failure and verify the change.",
+        }
     ],
+    "ability": "agentic_repo_repair",
+    "reward_model": {
+        "style": "rule",
+        "ground_truth": {
+            "reference_steps": [
+                "inspect parser source",
+                "implement boundary guard",
+                "execute parser regression suite",
+                "report verified test outcome",
+            ]
+        },
+    },
+    "extra_info": {
+        "task_id": "repair-001",
+        "split": "train",
+    },
+}
+
+details = compute_score(
+    data_source=row["data_source"],
+    solution_str=(
+        "Inspect parser source and isolate the faulty branch with repository "
+        "evidence. Implement boundary guard in the identified condition and "
+        "emit a focused diff. Execute parser regression suite and retain "
+        "successful command output. Report verified test outcome with the "
+        "changed behavior and validation scope."
+    ),
+    ground_truth=row["reward_model"]["ground_truth"],
+    extra_info=row["extra_info"],
+    return_details=True,
 )
 
-print(result.score)
-print(result.match_rate, result.order_rate)
-print(result.matched_steps)
-print(result.unmatched_steps)
+print(details["semantic_score"])
+print(details["score"])
+print(details["reference_steps_source"])  # ground_truth.reference_steps
+print(details["step_match_rate"], details["step_order_rate"])
+print(details["matched_steps"])
+print(details["unmatched_steps"])
 ```
 
-`result.score` is normalized to `0~1` by default and combines coverage and order: `score = match_rate * order_rate * max_score`. If semantic alignment should be a dominant reward term, apply an external task weight, for example `final_reward += 3.0 * result.score`.
+This matches the veRL RewardManager call:
+`ground_truth=reward_model.ground_truth`, `extra_info=extra_info`.
+`details["semantic_score"]` is normalized to `0..1` by default:
 
-- `match_rate`: fraction of reference steps that found a matching response window.
-- `order_rate`: among matched steps, the fraction of adjacent reference-step pairs whose best response windows appear in the expected order (`1.0` = fully ordered, `0.0` = fully reversed). This is computed from each matched step's strongest window, independent of the monotonic DP path, so it can detect scrambled responses even when `match_rate` is high.
+```text
+score = match_rate × order_rate × max_score
+```
 
-A step may carry multiple candidate actions (any one matching credits the step):
+The final `details["score"]` also includes the repetition penalty. Apply
+external weights in the training configuration when composing it with outcome
+reward.
+
+## 🧭 Scoring modes
+
+The following sections demonstrate lower-level Python APIs. In veRL/RLVR
+training, prefer the `compute_score()` and nested Parquet GroundTruth flow
+above.
+
+```python
+from raise_scorer.backends import load_embedding_backend
+from raise_scorer.core import ScorerConfig, SemanticRewardScorer
+
+backend = load_embedding_backend("intfloat/multilingual-e5-small")
+if backend is None:
+    raise RuntimeError("Embedding backend could not be loaded")
+scorer = SemanticRewardScorer(backend, ScorerConfig(threshold=0.80))
+```
+
+### 1. Linear steps and rollout batches
+
+A step may contain alternative actions. Any matching candidate credits that
+step:
 
 ```python
 result = scorer.score(
-    response="I searched the web, extracted the key evidence, and answered with a citation.",
+    response="I searched the web, opened the knowledge base, and cited evidence.",
     reference_steps=[
         "search for sources",
-        ["open web source", "open knowledge base"],  # either tool counts
-        "extract evidence",
-        "answer with citation",
+        ["open a web source", "open the knowledge base"],
+        "answer with a citation",
     ],
 )
 ```
 
-## Multi-Path Scoring (Branching Agent Plans)
-
-When a task admits multiple valid action sequences (different branches), pass every trajectory — the scorer evaluates each, and the best-matching one wins. A step within a trajectory can still carry multiple candidate actions.
-
-```mermaid
-flowchart LR
-    S["Task"] --> B1["Branch A"]
-    S --> B2["Branch B"]
-    B1 --> A1["reproduce bug"]
-    B1 --> A2["patch code"]
-    B1 --> A3["run tests"]
-    B2 --> C1["reproduce bug"]
-    B2 --> C2["add workaround"]
-    B2 --> C3["run tests"]
-    A3 --> Eval["score vs. response"]
-    C3 --> Eval
-    Eval --> Pick["pick max score"]
-```
+Use `score_batch()` in rollout workers:
 
 ```python
-from raise_scorer.trajectories import score_trajectories
+results = scorer.score_batch(
+    responses=[
+        "I inspected the module, patched it, and ran tests.",
+        "I reproduced the bug, added a workaround, and verified it.",
+    ],
+    reference_steps_batch=[
+        ["inspect files", "modify code", "run tests"],
+        ["reproduce bug", "add workaround", "verify the fix"],
+    ],
+)
+rewards = [item.score for item in results]
+```
+
+The coarse and fine passes combine active samples into shared embedding calls.
+Similarity matrices and alignment results remain sample-specific.
+
+### 2. Explicit alternative trajectories
+
+Use this for a small number of known valid branches:
+
+```python
+from raise_scorer.core import score_trajectories
 
 result = score_trajectories(
     scorer,
-    response="I reproduced the issue, added a workaround, and ran the tests.",
+    response="I reproduced the issue, added a workaround, and ran tests.",
     trajectories=[
-        ["reproduce bug", "patch code", "run tests"],         # branch A
-        ["reproduce bug", "add workaround", "run tests"],     # branch B
+        ["reproduce bug", "patch code", "run tests"],
+        ["reproduce bug", "add workaround", "run tests"],
     ],
 )
-print(result.best_index)   # → 1 (took branch B)
-print(result.score)        # → branch B's score
-print(result.result.matched_steps)
+
+print(result.best_index)
+print(result.score)
 ```
 
-Win criterion is `(score, match_rate, order_rate)` descending — a fully matching trajectory beats one with marginal score advantage but worse coverage.
+### 3. Workflow GroundTruth
 
-Cost: response windows encoded once and reused across trajectories via the LRU cache. Runtime scales with *distinct step strings*, not trajectories.
-
-## Confidence Routing (Judge Fallback)
-
-Semantic reward is fast but not always trustworthy. Use the built-in router:
+Use a bounded DAG/state machine when trajectories branch, retry, or roll back:
 
 ```python
-from raise_scorer import assess_confidence, classify_steps
-from raise_scorer.verl_adapter import compute_score
+from raise_scorer.workflows import WorkflowGroundTruth, WorkflowScorer
 
-# Audit step design before training
-print(classify_steps([
-    "summarize the reported bug symptoms",  # reasoning — good
-    "read the linked issue",                # proxy — weak signal
-    "run pytest on affected tests",         # observable — strong
-]))
+workflow = WorkflowGroundTruth.from_dict({
+    "start": "inspect",
+    "terminals": ["done"],
+    "nodes": [
+        {"id": "inspect", "stage": "diagnosis", "action": "inspect failing code"},
+        {
+            "id": "patch",
+            "stage": "repair",
+            "action": ["patch code", "apply workaround"],
+            "max_visits": 2,
+            "postconditions": {"repo": {"modified": True}},
+        },
+        {"id": "test", "stage": "verification", "action": "run tests", "max_visits": 2},
+        {"id": "failed", "action": "tests still fail"},
+        {"id": "done", "action": "tests pass", "outcome": "summarize the fix"},
+    ],
+    "edges": [
+        {"from": "inspect", "to": "patch"},
+        {"from": "patch", "to": "test", "max_traversals": 2},
+        {"from": "test", "to": "done"},
+        {"from": "test", "to": "failed"},
+        {"from": "failed", "to": "patch", "kind": "retry"},
+    ],
+})
 
-details = compute_score(solution_str, extra_info={"reference_steps": steps}, return_details=True)
-if details["fallback_recommended"]:
-    reward = llm_judge(solution_str, rubric)  # low match_rate, low margin, too many proxy steps, …
-else:
-    reward = details["score"]
+result = WorkflowScorer(scorer).score(response, workflow)
+print(result.best_path)
+print(result.stage_rewards)
+print(result.graph_states, result.graph_transitions)
 ```
 
-Run `python benchmarks/reward_quality.py --model-path ...` to measure fallback rates on your data.
+The default `alignment_mode="graph"` finitely unrolls bounded cycles, searches
+the workflow-state × response-window product directly, and runs full
+Action/Evidence/Outcome and state scoring only on the selected path. The old
+complete-path scorer remains available through
+`WorkflowScorerConfig(alignment_mode="enumerate")` as an ablation baseline.
+`max_graph_states`, `max_path_nodes`, and `max_expansions` bound worker cost.
 
-See [Reference Step Design Guidelines](docs/design.md#reference-step-design-guidelines) for which steps are observable vs proxy.
+See [the workflow example](examples/workflow_ground_truth.py) and
+[design notes](docs/design.md#workflow-groundtruth-v1).
 
-## 🔌 veRL Integration
+### 4. Turn-level potential reward
 
-Copy or import `raise_scorer.verl_adapter.compute_score` as a reward function:
+`WorkflowPotentialScorer` evaluates workflow-prefix progress after every agent
+turn:
 
 ```python
-from raise_scorer.verl_adapter import compute_score
+from raise_scorer.workflows import PotentialRewardConfig, WorkflowPotentialScorer
+
+potential_scorer = WorkflowPotentialScorer(
+    WorkflowScorer(scorer),
+    PotentialRewardConfig(gamma=1.0),
+)
+turn_result = potential_scorer.score_turns(
+    ["inspect failure", "patch code", "run tests", "summarize fix"],
+    workflow,
+)
+
+print(turn_result.potentials)
+print(turn_result.rewards)  # gamma * Phi_t - Phi_(t-1)
 ```
 
-Set the embedding model path:
+The default potential is required-node coverage. Agent turns are preserved as
+explicit passages, so two turns cannot collapse into one character window.
+Use `raise_scorer.experiments.assign_turn_rewards()` to place each increment on
+the final completion token of its agent turn.
 
-```bash
-export RAISE_MODEL_PATH=/path/to/bge-small-zh-v1.5
-export RAISE_THRESHOLD=0.65
-```
+### 5. Trusted runtime events
 
-Example input:
+Runtime evidence is stronger than model-written claims. Normalize framework
+tool calls into `TraceEvent` objects:
 
 ```python
-score = compute_score(
-    solution_str="<think>...</think> long model response",
-    ground_truth=None,
-    extra_info={
-        "reference_steps": [
-            "read the issue",
-            "inspect relevant files",
-            "modify the implementation",
-            "run tests",
-            "summarize the fix",
-        ]
+from raise_scorer.runtime import RuntimeEventAdapter
+from raise_scorer.workflows import WorkflowScorer
+
+# Construct this inside trusted rollout infrastructure.
+adapter = RuntimeEventAdapter(trusted_runtime=True)
+events = adapter.adapt_many([
+    {
+        "id": "inspect-1",
+        "tool": "read_file",
+        "arguments": {"path": "src/parser.py"},
+        "node_id": "inspect",
     },
+    {
+        "id": "verify-1",
+        "tool": "exec_command",
+        "arguments": {"cmd": "python -m pytest tests/test_parser.py -q"},
+        "output": {"stdout": "12 passed"},
+        "exit_code": 0,
+        "node_id": "done",
+    },
+])
+
+result = WorkflowScorer(scorer).score_events(events, workflow)
+print(result.trace_validation.to_dict())
+```
+
+The adapter supports shell/pytest, file read/write, browser, HTTP, namespaced
+tool names, and generic tools. Custom semantics can be registered with
+`EventSemantics`; `node_resolver` can map runtime records to workflow nodes.
+
+Trust is controlled only by the adapter instance. A tool payload cannot
+self-promote through `trusted=true` or `source=runtime`. Sensitive mapping keys
+such as tokens, passwords, cookies, and API keys are recursively redacted by
+default.
+
+See [the runtime adapter example](examples/runtime_adapters.py).
+
+## Embedding backends
+
+`load_embedding_backend()` accepts a local model directory or Hugging Face
+model ID:
+
+```python
+backend = load_embedding_backend(
+    "intfloat/multilingual-e5-small",
+    pooling="mean",
+    query_instruction="query: ",
+    passage_instruction="passage: ",
+    revision="<commit-sha>",
+    local_files_only=False,
 )
 ```
 
-`extra_info` accepts `reference_steps` (canonical) or `actions` (Agentic-RL alias). To drop the wrapper into a veRL source tree, copy `integrations/verl/utils/reward_score/semantic_align.py` to `verl/utils/reward_score/semantic_align.py` — it is a one-line re-export of `compute_score`.
+RAISE encodes reference steps as queries and response windows as passages.
+Built-in multilingual E5 presets select mean pooling and the required
+`query: `/`passage: ` prefixes automatically. Explicit options override a
+preset.
 
-## 🎯 Suitable Scenarios
+For production:
 
-- Agent trajectory reward: expected actions vs. actual trace.
-- Tool-use workflows: search, read, edit, test, report.
-- Code repair process scoring.
-- RAG answer evidence/checklist coverage.
-- Long-form response quality checks with required reference points.
-- SOP/checklist style structured reward.
-- Two-stage reward systems that reduce LLM Judge calls.
+- pin an exact model revision;
+- download models before starting offline workers;
+- calibrate thresholds on task-specific rollout data;
+- monitor `coverage_rate`, `tail_covered`, margins, and fallback rate.
 
-Less suitable:
+## Confidence routing
 
-- Open-ended creative writing with no reference structure.
-- Strict symbolic correctness, where a verifier is required.
-- Pure subjective preference ranking.
-- High-risk factual verification without structured evidence or Judge fallback.
+```python
+from raise_scorer.core import assess_confidence, classify_steps
 
-## 🛠️ Project Status
+print(classify_steps(reference_steps))
+report = assess_confidence(result, reference_steps, response=response)
 
-Alpha-stage plugin with core algorithm, veRL entrypoint, confidence routing, step-design guidelines, and calibration benchmarks. Before production:
+if report.fallback_recommended:
+    reward = llm_judge_or_verifier(response)
+else:
+    reward = result.score
+```
 
-1. Audit reference steps with `classify_steps()` — minimize proxy steps.
-2. Calibrate `threshold` and `RoutingConfig` on task hard negatives.
-3. Run `benchmarks/reward_quality.py` and `benchmarks/benchmark_latency.py` in your rollout environment.
-4. Monitor `fallback_recommended` rate — target low fallback on genuine data, high fallback on ambiguous/recitation samples.
+The router considers coverage, order, similarity margins, proxy-step ratio,
+trace evidence, and intention-only recitation. The optional hard trace gate is
+enabled with `ScorerConfig(require_trace=True)`.
+
+## veRL integration
+
+The canonical entrypoint is:
+
+```python
+from raise_scorer.integrations import compute_score
+```
+
+It accepts the current named custom-reward interface:
+
+```python
+compute_score(
+    data_source=...,
+    solution_str=...,
+    ground_truth=...,
+    extra_info=...,
+)
+```
+
+Configure the embedding backend:
+
+```bash
+export RAISE_MODEL_PATH=intfloat/multilingual-e5-small
+export RAISE_THRESHOLD=0.80
+export RAISE_MODEL_REVISION="<commit-sha>"
+export RAISE_LOCAL_FILES_ONLY=0
+```
+
+Supported `extra_info` fields:
+
+| Field | Purpose |
+| --- | --- |
+| `reference_steps` / `actions` | Linear GroundTruth |
+| `workflow_ground_truth` | DAG/state-machine GroundTruth |
+| `workflow_config` | Workflow scoring weights and gates |
+| `state_observations` | External before/after state |
+| `trace_events` | Pre-built runtime events |
+| `trace_validation_config` | Trace validation policy |
+| `tool_calls` | Runtime records to adapt |
+| `tool_adapter_config` | Runtime trust and redaction policy |
+
+### RLVR Parquet GroundTruth
+
+veRL reads the Parquet row, then passes only
+`reward_model.ground_truth` and `extra_info` to a custom reward function.
+RAISE therefore supports both recommended layouts:
+
+```python
+# Layout A: structured reward_model.ground_truth
+row = {
+    "reward_model": {
+        "style": "rule",
+        "ground_truth": {
+            "reference_steps": [
+                "inspect repository",
+                ["patch code", "apply workaround"],
+                "run tests",
+            ]
+        },
+    },
+    "extra_info": {"task_id": "repair-001"},
+}
+
+# Layout B: keep a final-answer target and put process steps in extra_info
+row = {
+    "reward_model": {
+        "style": "rule",
+        "ground_truth": "expected final answer",
+    },
+    "extra_info": {
+        "task_id": "repair-002",
+        "reference_steps": ["inspect repository", "patch code", "run tests"],
+    },
+}
+```
+
+Native Arrow lists/structs and JSON-serialized lists/objects are accepted.
+Plain scalar `ground_truth` strings are not interpreted as process steps, so a
+math answer such as `"42"` cannot accidentally become a reference step.
+
+Known nested paths include `metadata.reference_steps`,
+`rlvr.reference_steps`, and their `actions` aliases. A custom reward wrapper
+can pass `reference_steps_paths=["task.annotation.plan"]` for another schema.
+`return_details=True` reports the selected field as
+`reference_steps_source`.
+
+If `reference_steps` is a top-level Parquet column, move it into
+`extra_info` during dataset preprocessing; the standard veRL RewardManager
+does not forward arbitrary top-level columns to `compute_score`.
+
+See [the RLVR Parquet schema example](examples/rlvr_parquet_schema.py).
+
+The included wrapper is
+[`integrations/verl/utils/reward_score/semantic_align.py`](integrations/verl/utils/reward_score/semantic_align.py).
+
+## 📊 Benchmarks
+
+Latency:
+
+```bash
+python benchmarks/benchmark_latency.py \
+  --model-path intfloat/multilingual-e5-small \
+  --batch-size 32 \
+  --breakdown
+```
+
+Reward quality and routing:
+
+```bash
+python benchmarks/reward_quality.py \
+  --model-path intfloat/multilingual-e5-small \
+  --threshold 0.80
+```
+
+Per-sample audit:
+
+```bash
+python benchmarks/dump_scores.py \
+  --model-path intfloat/multilingual-e5-small \
+  --require-trace
+```
+
+Graph alignment versus terminal-path enumeration:
+
+```bash
+python benchmarks/benchmark_graph_alignment.py \
+  --model-path intfloat/multilingual-e5-small \
+  --branches 2 \
+  --layers 5
+```
+
+The small monotonic DP runs on CPU/NumPy while embedding GEMMs run on the
+selected accelerator. This avoids per-cell host/device synchronization.
+Benchmark your own hardware and rollout distribution before choosing limits.
+
+## 🧪 Three-domain online RL experiment
+
+The checked-in protocol defines
+`3 domains × 4 reward ablations × 3 seeds = 36 runs`:
+
+- Code: SWE-Gym training and SWE-bench Verified evaluation.
+- Browser: BrowserGym/WebArena training and WebArena Verified evaluation.
+- Tool use: executable BFCL multi-turn training and BFCL V4 agentic evaluation.
+- Rewards: `outcome_only`, `linear_terminal`, `graph_terminal`, and
+  `graph_turn_potential`.
+
+See the [online RL protocol](experiments/online_rl/README.md) for the matrix
+and required metrics. The Python protocol layer validates the suite, places
+turn rewards on tokens, and aggregates episodes by domain/ablation/seed.
+Environments only emit the existing trusted `TraceEvent` contract.
+
+## Package structure
+
+```text
+raise_scorer/
+├── backends/       model loading, pooling, encoding, cache
+├── core/           windows, alignment, scoring, confidence, trajectories
+├── workflows/      DAG/state-machine schema and hierarchical reward
+├── experiments/    online-RL protocols and turn-to-token reward placement
+├── runtime/        TraceEvent protocol, validation, tool-call adapters
+├── integrations/   training-framework entrypoints
+└── *.py            backward-compatible flat import shims
+```
+
+Recommended imports:
+
+```python
+from raise_scorer.backends import load_embedding_backend
+from raise_scorer.core import SemanticRewardScorer
+from raise_scorer.runtime import RuntimeEventAdapter, TraceEvent
+from raise_scorer.workflows import WorkflowGroundTruth, WorkflowScorer
+from raise_scorer.integrations import compute_score
+```
+
+Existing flat imports such as `raise_scorer.scorer` and
+`raise_scorer.verl_adapter` remain compatible.
+
+## 📚 Documentation and examples
+
+| Resource | Contents |
+| --- | --- |
+| [Design](docs/design.md) | Algorithms, trust boundary, reward design, calibration |
+| [Basic usage](examples/basic_usage.py) | Linear scoring |
+| [Workflow example](examples/workflow_ground_truth.py) | Retry and state verification |
+| [Runtime adapter example](examples/runtime_adapters.py) | Tool records to trusted events |
+| [Judge fallback](examples/judge_fallback_demo.py) | Confidence routing |
+| [veRL example](examples/verl_reward_fn.py) | Custom reward entrypoint |
+| [RLVR Parquet schema](examples/rlvr_parquet_schema.py) | Recommended GroundTruth layouts |
+| [Contributing](CONTRIBUTING.md) | Development and PR requirements |
+
+## Project boundary
+
+Recommended:
+
+- coding and repository-repair trajectories;
+- browser, search, and tool-use workflows;
+- structured RAG/evidence coverage;
+- SOP/checklist process reward;
+- two-stage RAISE + Judge/verifier systems.
+
+Use a dedicated verifier or Judge for strict program correctness, mathematical
+equivalence, high-risk factual claims, open-ended creativity, and subjective
+preference ranking.
+
+## 🚧 Status
+
+RAISE is alpha software. The core scorer, workflow engine, trusted runtime
+protocol, veRL entrypoint, routing signals, and benchmarks are covered by
+tests. Before production, add labeled rollout samples from your domain,
+calibrate thresholds and graph limits, pin model/framework versions, and
+monitor fallback and reward-hacking rates.
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).

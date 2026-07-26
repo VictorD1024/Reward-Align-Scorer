@@ -2,14 +2,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer
-from raise_scorer.scorer import WindowConfig
+from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer, WindowConfig  # noqa: E402
 
 
 class MockEmbedder:
     cache = type("Cache", (), {"stats": lambda self: {}})()
 
-    def encode(self, texts, use_cache=True):
+    def encode(self, texts, use_cache=True, text_types=None):
+        del text_types
         mapping = {
             "read task": [1.0, 0.0, 0.0],
             "edit code": [0.0, 1.0, 0.0],
@@ -26,6 +26,16 @@ class MockEmbedder:
             else:
                 rows.append([0.0, 0.0, 0.0])
         return torch.tensor(rows, dtype=torch.float32)
+
+
+class CountingMockEmbedder(MockEmbedder):
+    def __init__(self):
+        self.calls = []
+
+    def encode(self, texts, use_cache=True, text_types=None):
+        texts = list(texts)
+        self.calls.append({"texts": texts, "text_types": list(text_types) if text_types else None})
+        return super().encode(texts, use_cache=use_cache, text_types=text_types)
 
 
 def test_scorer_with_mock_embedder():
@@ -80,6 +90,157 @@ def test_scorer_multi_candidate_step_unmatched_reports_all_options():
 
     assert result.match_rate == pytest.approx(0.5)
     assert "edit code | refactor module" in result.unmatched_steps
+
+
+def test_scorer_reports_capped_window_coverage_stats():
+    scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    scorer.config = ScorerConfig(
+        threshold=0.65,
+        windows=WindowConfig(fine_window=48, fine_stride=24, max_windows=8),
+    )
+    scorer.embedder = MockEmbedder()
+
+    response = "read the issue. " + ("filler " * 1000) + "run tests."
+    result = scorer.score(
+        response=response,
+        reference_steps=["read task", "run tests"],
+        coarse_to_fine=False,
+    )
+
+    assert result.stats["candidate_windows"] > result.stats["num_windows"]
+    assert result.stats["num_windows"] == 8
+    assert result.stats["windows_downsampled"] is True
+    assert 0.0 < result.stats["coverage_rate"] < 1.0
+    assert result.stats["tail_covered"] is True
+    assert result.windows[-1][2] == len(response)
+
+
+def test_score_batch_uses_one_embedding_call_for_one_pass():
+    scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    scorer.config = ScorerConfig(threshold=0.65, windows=WindowConfig(fine_window=16, fine_stride=8))
+    scorer.embedder = CountingMockEmbedder()
+    scorer._trace_detector = None
+
+    results = scorer.score_batch(
+        responses=[
+            "read the issue. run tests.",
+            "edit the code. run tests.",
+        ],
+        reference_steps_batch=[
+            ["read task", "run tests"],
+            ["edit code", "run tests"],
+        ],
+        coarse_to_fine=False,
+    )
+
+    assert len(scorer.embedder.calls) == 1
+    call = scorer.embedder.calls[0]
+    assert call["text_types"].count("query") == 4
+    assert call["text_types"].count("passage") == len(call["text_types"]) - 4
+    assert len(results) == 2
+    assert all(result.score == pytest.approx(1.0) for result in results)
+    assert all(result.stats["batch_size"] == 2 for result in results)
+    assert all(result.stats["batch_pass_size"] == 2 for result in results)
+
+
+def test_score_batch_matches_individual_scores():
+    batch_scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    batch_scorer.config = ScorerConfig(threshold=0.65, windows=WindowConfig(fine_window=16, fine_stride=8))
+    batch_scorer.embedder = MockEmbedder()
+    batch_scorer._trace_detector = None
+
+    single_scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    single_scorer.config = batch_scorer.config
+    single_scorer.embedder = MockEmbedder()
+    single_scorer._trace_detector = None
+
+    responses = ["read the issue. run tests.", "edit the code. run tests."]
+    steps_batch = [["read task", "run tests"], ["edit code", "run tests"]]
+    batch_results = batch_scorer.score_batch(responses, steps_batch, coarse_to_fine=False)
+    single_results = [
+        single_scorer.score(response, steps, coarse_to_fine=False)
+        for response, steps in zip(responses, steps_batch)
+    ]
+
+    assert [result.score for result in batch_results] == [result.score for result in single_results]
+    assert [result.alignment_path for result in batch_results] == [
+        result.alignment_path for result in single_results
+    ]
+
+
+def test_score_batch_coarse_to_fine_batches_each_pass():
+    scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    scorer.config = ScorerConfig(
+        threshold=0.65,
+        windows=WindowConfig(
+            coarse_window=128,
+            coarse_stride=64,
+            fine_window=16,
+            fine_stride=8,
+        ),
+    )
+    scorer.embedder = CountingMockEmbedder()
+    scorer._trace_detector = None
+
+    results = scorer.score_batch(
+        responses=[
+            "read the issue. run tests.",
+            "edit the code. run tests.",
+        ],
+        reference_steps_batch=[
+            ["read task", "run tests"],
+            ["edit code", "run tests"],
+        ],
+    )
+
+    assert len(scorer.embedder.calls) == 2
+    assert all(result.stats["method"] == "coarse_to_fine" for result in results)
+    assert all(result.stats["batch_pass_size"] == 2 for result in results)
+
+
+def test_score_batch_fine_pass_only_contains_incomplete_coarse_samples():
+    scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    scorer.config = ScorerConfig(
+        threshold=0.65,
+        windows=WindowConfig(
+            coarse_window=128,
+            coarse_stride=64,
+            fine_window=16,
+            fine_stride=8,
+        ),
+    )
+    scorer.embedder = CountingMockEmbedder()
+    scorer._trace_detector = None
+
+    results = scorer.score_batch(
+        responses=[
+            "read the issue.",
+            "edit the code. run tests.",
+        ],
+        reference_steps_batch=[
+            ["read task"],
+            ["edit code", "run tests"],
+        ],
+    )
+
+    assert len(scorer.embedder.calls) == 2
+    assert results[0].stats["method"] == "coarse"
+    assert results[0].stats["batch_pass_size"] == 2
+    assert results[1].stats["method"] == "coarse_to_fine"
+    assert results[1].stats["batch_pass_size"] == 1
+
+
+def test_score_batch_validates_input_lengths():
+    scorer = SemanticRewardScorer.__new__(SemanticRewardScorer)
+    scorer.config = ScorerConfig()
+    scorer.embedder = MockEmbedder()
+    scorer._trace_detector = None
+
+    with pytest.raises(ValueError, match="same length"):
+        scorer.score_batch(["one", "two"], [["step"]])
+    with pytest.raises(TypeError, match="sequence of strings"):
+        scorer.score_batch("one response", [["step"]])
+    assert scorer.score_batch([], []) == []
 
 
 def _make_scorer(require_trace: bool) -> SemanticRewardScorer:

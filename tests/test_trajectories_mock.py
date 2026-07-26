@@ -2,14 +2,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer, WindowConfig
-from raise_scorer.trajectories import score_trajectories
+from raise_scorer.scorer import ScorerConfig, SemanticRewardScorer, WindowConfig  # noqa: E402
+from raise_scorer.trajectories import score_trajectories  # noqa: E402
 
 
 class MockEmbedder:
     cache = type("Cache", (), {"stats": lambda self: {}})()
 
-    def encode(self, texts, use_cache=True):
+    def encode(self, texts, use_cache=True, text_types=None):
+        del text_types
         rows = []
         for text in texts:
             if "read" in text:

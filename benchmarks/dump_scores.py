@@ -17,9 +17,13 @@ import argparse
 import json
 import sys
 
-from raise_scorer import ScorerConfig, SemanticRewardScorer
-from raise_scorer.embedding import load_embedding_backend
-from raise_scorer.scorer import _normalize_steps, _step_repr
+from raise_scorer.backends import load_embedding_backend
+from raise_scorer.core import (
+    ScorerConfig,
+    SemanticRewardScorer,
+    format_step,
+    normalize_steps,
+)
 
 
 def _load_samples(path: str):
@@ -75,8 +79,12 @@ def main():
             u = ungated.score(obj["response"], obj["reference_steps"])
             gated_idx = {si for si, _ in r.alignment_path}
             ungated_idx = {si for si, _ in u.alignment_path}
-            norm = _normalize_steps(obj["reference_steps"])
-            denied_names = [_step_repr(norm[si]) for si in sorted(ungated_idx - gated_idx) if si < len(norm)]
+            norm = normalize_steps(obj["reference_steps"])
+            denied_names = [
+                format_step(norm[si])
+                for si in sorted(ungated_idx - gated_idx)
+                if si < len(norm)
+            ]
         rows.append((i, obj, r, denied_names))
 
     if args.require_trace:
